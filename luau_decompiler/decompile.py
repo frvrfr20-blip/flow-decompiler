@@ -734,6 +734,20 @@ def decompile_proto(
                 return False
             emit_pending_table_local(source, indent)
 
+        mutable_name = mutable_capture_locals.get(target)
+        if mutable_name is not None:
+            if indent is None:
+                return False
+            source_name = regs.get(source, table.render())
+            if source_name != mutable_name:
+                emit_line(indent, f"{mutable_name} = {source_name}")
+            table.materialized = True
+            table_literals[target] = table
+            regs[target] = mutable_name
+            if open_results is not None and target >= open_results[0]:
+                open_results = None
+            return True
+
         local_name = _debug_local_name(proto, target, pc)
         source_name = regs.get(source, f"r{source}")
         if local_name is not None and target >= proto.numparams and local_key(target, local_name, pc) not in declared_locals:
@@ -1545,6 +1559,11 @@ def decompile_proto(
                 return candidate.a, "nil"
             if name == "MOVE":
                 return candidate.a, reg(candidate.b)
+            if name == "GETIMPORT" and candidate.aux is not None:
+                return candidate.a, _import_path_expr(proto, candidate.aux)
+            if name == "GETGLOBAL" and candidate.aux is not None:
+                key = proto.constant_text(candidate.aux) or f"K{candidate.aux}"
+                return candidate.a, _global_expr(key)
             if name == "GETUPVAL":
                 return candidate.a, _upvalue_name(proto, candidate.b, upvalue_names)
             if name in _BINARY_OPS:

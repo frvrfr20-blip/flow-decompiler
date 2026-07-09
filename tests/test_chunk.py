@@ -4111,6 +4111,87 @@ def make_branch_assignment_captured_by_closure_chunk():
     return bytes(out)
 
 
+def make_or_fallback_import_assignment_chunk():
+    strings = ["print", "Enum", "Fallback"]
+    words = [
+        encode_abc("MOVE", 1, 0, 0),
+        encode_ad("JUMPIF", 1, 2),
+        encode_ad("GETIMPORT", 1, 2),
+        import_id(1, 2),
+        encode_ad("GETIMPORT", 2, 1),
+        import_id(0),
+        encode_abc("MOVE", 3, 1, 0),
+        encode_abc("CALL", 2, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_branch_table_alias_reassigns_parameter_chunk():
+    strings = ["print"]
+    words = [
+        encode_ad("JUMPIFNOT", 1, 6),
+        encode_abc("NEWTABLE", 2, 0, 0),
+        1,
+        encode_abc("MOVE", 3, 0, 0),
+        encode_abc("SETLIST", 2, 3, 2),
+        1,
+        encode_abc("MOVE", 0, 2, 0),
+        encode_ad("GETIMPORT", 2, 1),
+        import_id(0),
+        encode_abc("MOVE", 3, 0, 0),
+        encode_abc("CALL", 2, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -7755,6 +7836,22 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn('if p0 then\n    r2 = "outer"\nend', source)
         self.assertNotIn("\nif p0 then\nend", source)
+
+    def test_decompile_or_fallback_import_assignment(self):
+        chunk = parse_chunk(make_or_fallback_import_assignment_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("print(p0 or Enum.Fallback)", source)
+        self.assertNotIn("\nif p0 then\nend", source)
+
+    def test_decompile_branch_table_alias_reassigns_parameter(self):
+        chunk = parse_chunk(make_branch_table_alias_reassigns_parameter_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if p1 then\n    p0 = {p0}\nend\nprint(p0)", source)
+        self.assertNotIn("\nif p1 then\nend", source)
 
     def test_decompile_constant_comparison_if_block(self):
         chunk = parse_chunk(make_constant_comparison_if_call_chunk())

@@ -1907,6 +1907,54 @@ def make_or_call_middle_value_chain_local_chunk():
     return bytes(out)
 
 
+def make_nested_or_value_join_branch_chunk():
+    strings = ["flag", "other", "a", "b", "value"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 8),
+        encode_ad("JUMPIFNOT", 1, 5),
+        encode_abc("MOVE", 5, 2, 0),
+        encode_ad("JUMPIF", 5, 1),
+        encode_abc("MOVE", 5, 3, 0),
+        encode_abc("MOVE", 4, 5, 0),
+        encode_ad("JUMP", 0, 3),
+        encode_abc("MOVE", 4, 2, 0),
+        encode_ad("JUMP", 0, 1),
+        encode_abc("MOVE", 4, 3, 0),
+        encode_abc("RETURN", 4, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 4, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(5)
+    for name_id, reg_id in ((1, 0), (2, 1), (3, 2), (4, 3)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(11)
+        out.append(reg_id)
+    out += varint(5)
+    out += varint(5)
+    out += varint(11)
+    out.append(4)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_and_or_value_chain_local_chunk():
     strings = ["a", "b", "c", "value"]
     words = [
@@ -3511,6 +3559,45 @@ def make_register_compare_preserves_condition_setup_chunk():
     out += varint(0)
     out.append(0)
     out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_register_compare_or_return_guard_chunk():
+    strings = ["now", "available", "cached"]
+    words = [
+        encode_ad("JUMPIFEQ", 2, 3),
+        1,
+        encode_ad("JUMPIFNOTLT", 1, 2),
+        0,
+        encode_abc("RETURN", 0, 1, 0),
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 3, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(3)
+    for name_id, reg_id in ((1, 0), (2, 1), (3, 2)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(6)
+        out.append(reg_id)
+    out += varint(0)
     out += varint(0)
     return bytes(out)
 
@@ -6390,6 +6477,14 @@ class ChunkTests(unittest.TestCase):
         self.assertNotIn("if not a then", source)
         self.assertNotIn("JUMPIF", source)
 
+    def test_decompile_nested_or_value_join_branch(self):
+        chunk = parse_chunk(make_nested_or_value_join_branch_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertNotIn("-- pc 6: 0006 JUMP", source)
+        self.assertIn("return value", source)
+
     def test_decompile_and_or_value_chain_local(self):
         chunk = parse_chunk(make_and_or_value_chain_local_chunk())
 
@@ -6707,6 +6802,17 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("if 0 < upvalue0 then", source)
         self.assertNotIn("if upvalue0 < upvalue0 then", source)
+
+    def test_decompile_register_compare_or_return_guard(self):
+        chunk = parse_chunk(make_register_compare_or_return_guard_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "if cached == available or available < now then\n    return\nend",
+            source,
+        )
+        self.assertNotIn("JUMPIFNOTLT", source)
 
     def test_decompile_comparison_boolean_value(self):
         chunk = parse_chunk(make_comparison_boolean_value_chunk())

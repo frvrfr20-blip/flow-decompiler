@@ -514,6 +514,14 @@ def decompile_proto(
     def reg(reg_id: int) -> str:
         return regs.get(reg_id, f"r{reg_id}")
 
+    def return_reg(reg_id: int, pc: int) -> str:
+        current = reg(reg_id)
+        if current == f"r{reg_id}":
+            local_name = _debug_local_name(proto, reg_id, pc)
+            if local_name is not None:
+                return local_name
+        return current
+
     def emit_line(indent: int, value: str) -> None:
         prefix = "    " * indent
         for line in value.splitlines() or [""]:
@@ -863,6 +871,7 @@ def decompile_proto(
         indent: int,
         loop_continue_pc: int | None = None,
         loop_exit_pc: int | None = None,
+        branch_exit_pc: int | None = None,
     ) -> int:
         nonlocal encoded_header_written, open_results, regs, table_literals
 
@@ -2060,7 +2069,7 @@ def decompile_proto(
         def folded_short_circuit_if_index(insn) -> int | None:
             nonlocal open_results, regs, table_literals
 
-            if insn.op.name in _REGISTER_COMPARE_FALLTHROUGH_OPS:
+            if insn.op.name in {"JUMPIFLE", "JUMPIFLT", "JUMPIFNOTLE", "JUMPIFNOTLT"}:
                 return None
 
             saved = snapshot_state()
@@ -2703,7 +2712,11 @@ def decompile_proto(
                             maybe_jump.op.name == "JUMP"
                             and jump_target is not None
                             and jump_target > target
-                            and (stop_pc is None or jump_target <= stop_pc)
+                            and (
+                                stop_pc is None
+                                or jump_target <= stop_pc
+                                or jump_target == branch_exit_pc
+                            )
                             and jump_target in pc_to_index
                         ):
                             has_else = True
@@ -2730,7 +2743,7 @@ def decompile_proto(
                     saved_tables = clone_tables()
                     open_results = None
                     emit_line(indent, f"if {condition} then")
-                    emit_range(body_index, branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+                    emit_range(body_index, branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
                     if has_else:
                         regs = dict(saved_regs)
                         table_literals = {
@@ -2740,7 +2753,7 @@ def decompile_proto(
                         open_results = None
                         if not emit_elseif_chain(else_index, end_pc):
                             emit_line(indent, "else")
-                            emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+                            emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
                     emit_line(indent, "end")
                     regs = saved_regs
                     table_literals = saved_tables
@@ -3045,12 +3058,17 @@ def decompile_proto(
                         emit_line(indent, "return")
                 else:
                     open_results = None
-                    values = [reg(insn.a + offset) for offset in range(insn.b - 1)]
+                    values = [return_reg(insn.a + offset, insn.pc) for offset in range(insn.b - 1)]
                     emit_line(indent, f"return {', '.join(values)}")
             elif name in {"JUMP", "JUMPX"}:
                 open_results = None
                 target = insn.jump_target
                 target_index = pc_to_index.get(target) if target is not None else None
+                if target is not None and target == branch_exit_pc:
+                    if target_index is not None:
+                        index = target_index
+                        continue
+                    break
                 if target is not None and target == loop_exit_pc:
                     emit_line(indent, "break")
                     if stop_pc is not None and stop_pc in pc_to_index:

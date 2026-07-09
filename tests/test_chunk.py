@@ -1499,6 +1499,58 @@ def make_numeric_loop_scalar_liveout_chunk():
     return bytes(out)
 
 
+def make_loop_table_insert_accumulator_chunk():
+    strings = ["table", "insert", "print"]
+    words = [
+        encode_abc("NEWTABLE", 4, 0, 0),
+        0,
+        encode_ad("LOADN", 0, 3),
+        encode_ad("LOADN", 1, 1),
+        encode_ad("LOADN", 2, 1),
+        encode_ad("FORNPREP", 0, 6),
+        encode_ad("GETIMPORT", 5, 2),
+        import_id(0, 1),
+        encode_abc("MOVE", 6, 4, 0),
+        encode_abc("MOVE", 7, 3, 0),
+        encode_abc("CALL", 5, 3, 1),
+        encode_ad("FORNLOOP", 0, -6),
+        encode_abc("MOVE", 0, 4, 0),
+        encode_abc("LOADNIL", 1, 0, 0),
+        encode_abc("LOADNIL", 2, 0, 0),
+        encode_ad("FORGPREP", 0, 4),
+        encode_ad("GETIMPORT", 5, 3),
+        import_id(2),
+        encode_abc("MOVE", 6, 3, 0),
+        encode_abc("CALL", 5, 2, 1),
+        encode_ad("FORGLOOP", 0, -5),
+        1,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([8, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    for string_id in (1, 2, 3):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_generic_for_pairs_pending_table_literal_chunk():
     strings = ["a", "b", "c", "pairs", "print", "t", "k", "v"]
     words = [
@@ -7469,6 +7521,23 @@ class ChunkTests(unittest.TestCase):
             source,
         )
         self.assertNotIn("return true", source)
+
+    def test_decompile_loop_table_insert_accumulator_materializes_before_loop(self):
+        chunk = parse_chunk(make_loop_table_insert_accumulator_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local r4 = {}\n"
+            "for r3 = 1, 3, 1 do\n"
+            "    table.insert(r4, r3)\n"
+            "end\n"
+            "for r3 in r4 do\n"
+            "    print(r3)\n"
+            "end",
+            source,
+        )
+        self.assertNotIn("for r3 in {} do", source)
 
     def test_decompile_infers_require_module_local_from_terminal_path(self):
         chunk = parse_chunk(make_inferred_require_module_local_chunk())

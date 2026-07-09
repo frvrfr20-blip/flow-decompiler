@@ -1219,6 +1219,7 @@ def decompile_proto(
             seen: set[int] = set()
             for start, end_pc in ranges:
                 aliases: dict[int, int] = {}
+                scan_regs = dict(regs)
                 scan = start
                 while scan < len(instructions):
                     candidate = instructions[scan]
@@ -1226,10 +1227,34 @@ def decompile_proto(
                         break
                     if candidate.op.name == "MOVE":
                         source = aliases.get(candidate.b, candidate.b)
+                        scan_regs[candidate.a] = scan_regs.get(candidate.b, reg(candidate.b))
                         if source in table_literals:
                             aliases[candidate.a] = source
                         else:
                             aliases.pop(candidate.a, None)
+                        scan += 1
+                        continue
+                    if candidate.op.name == "GETIMPORT" and candidate.aux is not None:
+                        scan_regs[candidate.a] = _import_path_expr(proto, candidate.aux)
+                        aliases.pop(candidate.a, None)
+                        scan += 1
+                        continue
+                    if candidate.op.name == "GETGLOBAL" and candidate.aux is not None:
+                        key = proto.constant_text(candidate.aux) or f"K{candidate.aux}"
+                        scan_regs[candidate.a] = _global_expr(key)
+                        aliases.pop(candidate.a, None)
+                        scan += 1
+                        continue
+                    if candidate.op.name in {"CALL", "CALLFB"} and candidate.b >= 2:
+                        function = scan_regs.get(candidate.a, reg(candidate.a))
+                        if function == "table.insert":
+                            arg_reg_id = candidate.a + 1
+                            resolved_reg_id = aliases.get(arg_reg_id, arg_reg_id)
+                            table = table_literals.get(resolved_reg_id)
+                            if table is not None and not table.materialized and resolved_reg_id not in seen:
+                                materialize_table_reg(resolved_reg_id, indent)
+                                seen.add(resolved_reg_id)
+                        aliases.pop(candidate.a, None)
                         scan += 1
                         continue
                     reg_id = table_write_register(candidate)

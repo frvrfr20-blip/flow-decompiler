@@ -1,0 +1,11 @@
+[project]
+name = "flow-decompiler"
+version = "0.1.0"
+description = "Flow Decompiler: Luau bytecode parser, disassembler, CFG builder, and source reconstruction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+
+[project.scripts]
+flow-decompiler = "luau_decompiler.cli:main"
+luau-decompiler = "luau_decompiler.cli:main"

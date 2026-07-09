@@ -1489,6 +1489,21 @@ def decompile_proto(
                 if instruction_writes_register(instructions[scan_index], reg_id)
             )
 
+        def is_generic_for_nil_state_setup(instruction_index: int) -> bool:
+            candidate = instructions[instruction_index]
+            if candidate.op.name != "LOADNIL":
+                return False
+            scan_index = instruction_index + 1
+            while scan_index < len(instructions) and instructions[scan_index].op.name == "LOADNIL":
+                scan_index += 1
+            if scan_index >= len(instructions):
+                return False
+            maybe_for = instructions[scan_index]
+            return (
+                maybe_for.op.name in {"FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT"}
+                and candidate.a in {maybe_for.a + 1, maybe_for.a + 2}
+            )
+
         def future_table_read_count(start_index: int, table: TableLiteral) -> int:
             return sum(
                 future_register_read_count(start_index, reg_id)
@@ -3324,6 +3339,10 @@ def decompile_proto(
                         index = target_index
                         continue
             elif name == "LOADNIL":
+                if is_generic_for_nil_state_setup(index):
+                    set_reg(insn.a, "nil")
+                    index += 1
+                    continue
                 set_reg_or_declare_local(insn.a, "nil", insn.next_pc, indent)
             elif name == "MOVE":
                 if not alias_table_reg(insn.a, insn.b, insn.next_pc, indent):

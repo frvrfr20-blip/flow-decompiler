@@ -5303,7 +5303,7 @@ def make_numeric_for_named_call_chunk():
 
 
 def make_generic_for_named_call_chunk():
-    strings = ["next", "items", "print", "key", "value"]
+    strings = ["next", "items", "print", "key", "value", "state"]
     words = [
         encode_ad("GETIMPORT", 0, 1),
         import_id(0),
@@ -5350,7 +5350,11 @@ def make_generic_for_named_call_chunk():
     out += varint(0)
     out.append(0)
     out.append(1)
-    out += varint(2)
+    out += varint(3)
+    out += varint(6)
+    out += varint(5)
+    out += varint(11)
+    out.append(2)
     out += varint(4)
     out += varint(6)
     out += varint(11)
@@ -8167,6 +8171,7 @@ class ChunkTests(unittest.TestCase):
         source = decompile_chunk(chunk)
 
         self.assertIn("for key, value in next, items do\n    print(key, value)\nend", source)
+        self.assertNotIn("state = nil", source)
         self.assertNotIn("FORGPREP", source)
         self.assertNotIn("FORGLOOP", source)
 

@@ -247,12 +247,11 @@ def _load_bytes(path: Path) -> bytes:
     return data
 
 
-def render_file(path: str | Path, mode: str = "decompile", proto: int | None = None) -> str:
+def render_bytes(data: bytes, mode: str = "decompile", proto: int | None = None) -> str:
     if mode not in MODES:
         raise ValueError(f"unknown mode: {mode}")
 
-    source = Path(path)
-    chunk = parse_chunk(_load_bytes(source))
+    chunk = parse_chunk(data)
     proto_id = chunk.main_proto if proto is None else proto
     selected = chunk.protos[proto_id]
 
@@ -261,6 +260,15 @@ def render_file(path: str | Path, mode: str = "decompile", proto: int | None = N
     if mode == "disasm":
         return "\n".join(insn.disassemble() for insn in selected.instructions) + "\n"
     return decompile_chunk(chunk, proto)
+
+
+def render_text(text: str, mode: str = "decompile", proto: int | None = None) -> str:
+    data = maybe_base64_decode(text.encode("utf-8"))
+    return render_bytes(data, mode, proto)
+
+
+def render_file(path: str | Path, mode: str = "decompile", proto: int | None = None) -> str:
+    return render_bytes(_load_bytes(Path(path)), mode, proto)
 
 
 class FlowDecompilerApp:
@@ -502,26 +510,28 @@ class FlowDecompilerApp:
         self._run()
 
     def _run(self) -> None:
-        if not self.path:
-            self.status.set("Open a bytecode file first")
+        pasted = self.output.get("1.0", "end-1c").strip()
+        if not self.path and not pasted:
+            self.status.set("Open a file or paste bytecode")
             return
 
         self.render_token += 1
         token = self.render_token
-        path = self.path
+        source = self.path if self.path else pasted
+        label = self.path.name if self.path else "pasted input"
         mode = self.mode.get()
-        self._set_busy(True, f"{path.name} -> {mode}")
+        self._set_busy(True, f"{label} -> {mode}")
 
-        thread = threading.Thread(target=self._render_worker, args=(token, path, mode), daemon=True)
+        thread = threading.Thread(target=self._render_worker, args=(token, source, label, mode), daemon=True)
         thread.start()
         self.root.after(40, self._poll_render)
 
-    def _render_worker(self, token: int, path: Path, mode: str) -> None:
+    def _render_worker(self, token: int, source: Path | str, label: str, mode: str) -> None:
         try:
-            output = render_file(path, mode)
-            self.render_queue.put((token, output, None, path.name, mode))
+            output = render_file(source, mode) if isinstance(source, Path) else render_text(source, mode)
+            self.render_queue.put((token, output, None, label, mode))
         except Exception as exc:
-            self.render_queue.put((token, "", str(exc), path.name, mode))
+            self.render_queue.put((token, "", str(exc), label, mode))
 
     def _poll_render(self) -> None:
         try:

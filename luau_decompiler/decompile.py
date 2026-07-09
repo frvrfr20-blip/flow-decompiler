@@ -1333,6 +1333,13 @@ def decompile_proto(
                     break
             return count
 
+        def previous_register_write_count(stop_index: int, reg_id: int) -> int:
+            return sum(
+                1
+                for scan_index in range(max(stop_index, 0))
+                if instruction_writes_register(instructions[scan_index], reg_id)
+            )
+
         def future_table_read_count(start_index: int, table: TableLiteral) -> int:
             return sum(
                 future_register_read_count(start_index, reg_id)
@@ -2245,13 +2252,39 @@ def decompile_proto(
                             return or_end_index
 
                     branch_saved = snapshot_state()
+                    or_branch_stop_pc = or_end_pc
+                    or_else_index = None
+                    or_final_end_pc = or_end_pc
+                    or_final_end_index = or_end_index
+                    if or_end_index > or_body_index:
+                        maybe_then_jump = instructions[or_end_index - 1]
+                        maybe_then_end_pc = maybe_then_jump.jump_target
+                        maybe_then_end_index = pc_to_index.get(maybe_then_end_pc) if maybe_then_end_pc is not None else None
+                        if (
+                            maybe_then_jump.op.name in {"JUMP", "JUMPX"}
+                            and maybe_then_end_pc is not None
+                            and maybe_then_end_index is not None
+                            and maybe_then_end_pc > or_end_pc
+                            and (stop_pc is None or maybe_then_end_pc <= stop_pc)
+                        ):
+                            or_branch_stop_pc = maybe_then_jump.pc
+                            or_else_index = or_end_index
+                            or_final_end_pc = maybe_then_end_pc
+                            or_final_end_index = maybe_then_end_index
+
                     open_results = None
                     emit_line(indent, f"if {or_condition} then")
-                    emit_range(or_body_index, or_end_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+                    emit_range(or_body_index, or_branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc, or_final_end_pc)
+                    if or_else_index is not None:
+                        restore_state(branch_saved)
+                        open_results = None
+                        if not emit_elseif_chain(or_else_index, or_final_end_pc):
+                            emit_line(indent, "else")
+                            emit_range(or_else_index, or_final_end_pc, indent + 1, loop_continue_pc, loop_exit_pc, or_final_end_pc)
                     emit_line(indent, "end")
                     restore_state(branch_saved)
                     restore_state(saved)
-                    return or_end_index
+                    return or_final_end_index
 
             restore_state(saved)
 
@@ -2342,13 +2375,13 @@ def decompile_proto(
 
                     open_results = None
                     emit_line(indent, f"if {condition_chain_source(conditions, 'and')} then")
-                    emit_range(current_index, branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+                    emit_range(current_index, branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
                     if else_index is not None:
                         restore_state(branch_saved)
                         open_results = None
                         if not emit_elseif_chain(else_index, end_pc):
                             emit_line(indent, "else")
-                            emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+                            emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
                     emit_line(indent, "end")
                     restore_state(branch_saved)
                     restore_state(saved)
@@ -2630,6 +2663,53 @@ def decompile_proto(
                 target = insn.jump_target
                 body_index = pc_to_index.get(insn.next_pc)
                 target_index = pc_to_index.get(target) if target is not None else None
+                break_condition = jump_taken_condition(insn)
+                if (
+                    break_condition in {"true", "false", "not true", "not false"}
+                    and previous_register_write_count(index, insn.a) > 1
+                ):
+                    raw_register = _debug_local_name(proto, insn.a, insn.pc) or f"r{insn.a}"
+                    if insn.op.name == "JUMPIF":
+                        break_condition = raw_register
+                    elif insn.op.name == "JUMPIFNOT":
+                        break_condition = _unary_expr("not", raw_register)
+                if (
+                    break_condition is not None
+                    and target is not None
+                    and target == loop_exit_pc
+                    and body_index is not None
+                    and target > insn.next_pc
+                    and stop_pc is not None
+                    and target > stop_pc
+                    and target != branch_exit_pc
+                ):
+                    open_results = None
+                    emit_line(indent, f"if {break_condition} then")
+                    emit_line(indent + 1, "break")
+                    emit_line(indent, "end")
+                    index = body_index
+                    continue
+
+                return_condition = jump_taken_condition(insn)
+                if (
+                    return_condition is not None
+                    and target is not None
+                    and target_index is not None
+                    and target_index == len(instructions) - 1
+                    and instructions[target_index].op.name == "RETURN"
+                    and body_index is not None
+                    and target > insn.next_pc
+                    and stop_pc is not None
+                    and target > stop_pc
+                    and target != branch_exit_pc
+                ):
+                    open_results = None
+                    emit_line(indent, f"if {return_condition} then")
+                    emit_line(indent + 1, "return")
+                    emit_line(indent, "end")
+                    index = body_index
+                    continue
+
                 condition = jump_fallthrough_condition(insn)
                 if (
                     condition is not None
@@ -2637,8 +2717,34 @@ def decompile_proto(
                     and body_index is not None
                     and target_index is not None
                     and target > insn.next_pc
-                    and (stop_pc is None or target <= stop_pc)
+                    and (
+                        stop_pc is None
+                        or target <= stop_pc
+                        or target == branch_exit_pc
+                    )
                 ):
+                    if stop_pc is not None and target == branch_exit_pc and target > stop_pc:
+                        branch_exit_jump = instructions[pc_to_index[stop_pc] - 1] if stop_pc in pc_to_index and pc_to_index[stop_pc] > body_index else None
+                        body_stop_pc = (
+                            branch_exit_jump.pc
+                            if branch_exit_jump is not None
+                            and branch_exit_jump.op.name in {"JUMP", "JUMPX"}
+                            and branch_exit_jump.jump_target == branch_exit_pc
+                            else stop_pc
+                        )
+
+                        saved_regs = dict(regs)
+                        saved_tables = clone_tables()
+                        open_results = None
+                        emit_line(indent, f"if {condition} then")
+                        emit_range(body_index, body_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc, branch_exit_pc)
+                        emit_line(indent, "end")
+                        regs = saved_regs
+                        table_literals = saved_tables
+                        open_results = None
+                        index = pc_to_index.get(stop_pc, target_index)
+                        continue
+
                     if target_index > body_index:
                         loop_conditions = [condition]
                         loop_body_index = body_index

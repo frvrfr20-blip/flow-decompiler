@@ -3331,6 +3331,444 @@ def make_comparison_if_call_chunk():
     return bytes(out)
 
 
+def make_inner_compare_exits_parent_branch_chunk():
+    strings = ["print", "inner", "else", "flag", "value", "limit"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 7),
+        encode_ad("JUMPIFNOTLT", 1, 10),
+        2,
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_ad("LOADK", 4, 2),
+        encode_abc("CALL", 3, 2, 1),
+        encode_ad("JUMP", 0, 4),
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_ad("LOADK", 4, 3),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 3, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(3)
+    for name_id, reg_id in ((4, 0), (5, 1), (6, 2)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(13)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_or_branch_inner_compare_exits_join_chunk():
+    strings = ["print", "first", "else", "a", "b", "value", "limit"]
+    words = [
+        encode_ad("JUMPIF", 0, 1),
+        encode_ad("JUMPIFNOT", 1, 7),
+        encode_ad("JUMPIFNOTLT", 2, 10),
+        3,
+        encode_ad("GETIMPORT", 4, 1),
+        import_id(0),
+        encode_ad("LOADK", 5, 2),
+        encode_abc("CALL", 4, 2, 1),
+        encode_ad("JUMP", 0, 4),
+        encode_ad("GETIMPORT", 4, 1),
+        import_id(0),
+        encode_ad("LOADK", 5, 3),
+        encode_abc("CALL", 4, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 4, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(4)
+    for name_id, reg_id in ((4, 0), (5, 1), (6, 2), (7, 3)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(14)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_call_guard_exits_parent_branch_chunk():
+    strings = ["print", "FindFirstChild", "hit", "else", "flag", "target", "name"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 10),
+        encode_abc("MOVE", 5, 2, 0),
+        encode_abc("NAMECALL", 3, 1, 0),
+        2,
+        encode_abc("CALL", 3, 3, 2),
+        encode_ad("JUMPIFNOT", 3, 9),
+        encode_ad("GETIMPORT", 4, 1),
+        import_id(0),
+        encode_ad("LOADK", 5, 3),
+        encode_abc("CALL", 4, 2, 1),
+        encode_ad("JUMP", 0, 4),
+        encode_ad("GETIMPORT", 4, 1),
+        import_id(0),
+        encode_ad("LOADK", 5, 4),
+        encode_abc("CALL", 4, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 3, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(5)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out.append(3)
+    out += varint(4)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(3)
+    for name_id, reg_id in ((5, 0), (6, 1), (7, 2)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(16)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_and_call_guard_exits_parent_branch_chunk():
+    strings = ["print", "FindFirstChild", "hit", "else", "flag", "ok", "target", "name"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 11),
+        encode_ad("JUMPIFNOT", 1, 10),
+        encode_abc("MOVE", 6, 3, 0),
+        encode_abc("NAMECALL", 4, 2, 0),
+        2,
+        encode_abc("CALL", 4, 3, 2),
+        encode_ad("JUMPIFNOT", 4, 9),
+        encode_ad("GETIMPORT", 5, 1),
+        import_id(0),
+        encode_ad("LOADK", 6, 3),
+        encode_abc("CALL", 5, 2, 1),
+        encode_ad("JUMP", 0, 4),
+        encode_ad("GETIMPORT", 5, 1),
+        import_id(0),
+        encode_ad("LOADK", 6, 4),
+        encode_abc("CALL", 5, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([7, 4, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(5)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out.append(3)
+    out += varint(4)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(4)
+    for name_id, reg_id in ((5, 0), (6, 1), (7, 2), (8, 3)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(17)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_loop_exit_guard_chunk():
+    strings = ["print", "body", "keep"]
+    words = [
+        encode_ad("LOADN", 0, 3),
+        encode_ad("LOADN", 1, 1),
+        encode_ad("LOADN", 2, 1),
+        encode_ad("FORNPREP", 0, 6),
+        encode_ad("JUMPIFNOT", 4, 5),
+        encode_ad("GETIMPORT", 5, 1),
+        import_id(0),
+        encode_ad("LOADK", 6, 2),
+        encode_abc("CALL", 5, 2, 1),
+        encode_ad("FORNLOOP", 0, -6),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([7, 5, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(1)
+    out += varint(3)
+    out += varint(0)
+    out += varint(11)
+    out.append(4)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_loop_exit_guard_merged_boolean_chunk():
+    strings = ["print", "body", "keep", "use"]
+    words = [
+        encode_abc("LOADB", 4, 0, 0),
+        encode_ad("JUMPIFNOT", 5, 2),
+        encode_abc("LOADB", 4, 1, 0),
+        encode_ad("LOADN", 0, 3),
+        encode_ad("LOADN", 1, 1),
+        encode_ad("LOADN", 2, 1),
+        encode_ad("FORNPREP", 0, 6),
+        encode_ad("JUMPIFNOT", 4, 5),
+        encode_ad("GETIMPORT", 6, 1),
+        import_id(0),
+        encode_ad("LOADK", 7, 2),
+        encode_abc("CALL", 6, 2, 1),
+        encode_ad("FORNLOOP", 0, -6),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([8, 6, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(2)
+    for name_id, reg_id in ((3, 4), (4, 5)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(14)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_return_guard_exits_parent_branch_chunk():
+    strings = ["print", "run", "else", "mode", "done"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 6),
+        encode_ad("JUMPIF", 1, 9),
+        encode_ad("GETIMPORT", 2, 1),
+        import_id(0),
+        encode_ad("LOADK", 3, 2),
+        encode_abc("CALL", 2, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_ad("GETIMPORT", 2, 1),
+        import_id(0),
+        encode_ad("LOADK", 3, 3),
+        encode_abc("CALL", 2, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(2)
+    for name_id, reg_id in ((4, 0), (5, 1)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(12)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_contained_if_in_terminating_else_chunk():
+    strings = ["print", "body", "after", "mode", "guard", "looped"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_ad("JUMPIFNOT", 1, 6),
+        encode_ad("JUMPIFNOT", 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_ad("LOADK", 4, 2),
+        encode_abc("CALL", 3, 2, 1),
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_ad("LOADK", 4, 3),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 3, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(3)
+    for name_id, reg_id in ((4, 0), (5, 1), (6, 2)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(14)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -6749,6 +7187,96 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn('if 1 < 2 then\n    print("lt")\nend', source)
         self.assertNotIn("JUMPIFNOTLT", source)
+
+    def test_decompile_inner_compare_exits_parent_branch(self):
+        chunk = parse_chunk(make_inner_compare_exits_parent_branch_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'if flag then\n'
+            '    if value < limit then\n'
+            '        print("inner")\n'
+            '    end\n'
+            'else\n'
+            '    print("else")\n'
+            "end",
+            source,
+        )
+        self.assertNotIn("JUMPIFNOTLT", source)
+        self.assertNotIn("JUMP R0", source)
+
+    def test_decompile_or_branch_inner_compare_exits_join(self):
+        chunk = parse_chunk(make_or_branch_inner_compare_exits_join_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if a or b then", source)
+        self.assertIn('if value < limit then\n        print("first")\n    end', source)
+        self.assertNotIn("JUMPIFNOTLT", source)
+        self.assertNotIn("JUMP R0", source)
+
+    def test_decompile_call_guard_exits_parent_branch(self):
+        chunk = parse_chunk(make_call_guard_exits_parent_branch_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if flag then", source)
+        self.assertIn('if target:FindFirstChild(name) then\n        print("hit")\n    end', source)
+        self.assertIn('else\n    print("else")\nend', source)
+        self.assertNotIn("JUMPIFNOT", source)
+        self.assertNotIn("JUMP R0", source)
+
+    def test_decompile_and_call_guard_exits_parent_branch(self):
+        chunk = parse_chunk(make_and_call_guard_exits_parent_branch_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if flag and ok then", source)
+        self.assertIn('if target:FindFirstChild(name) then\n        print("hit")\n    end', source)
+        self.assertIn('else\n    print("else")\nend', source)
+        self.assertNotIn("JUMPIFNOT", source)
+        self.assertNotIn("JUMP R0", source)
+
+    def test_decompile_loop_exit_guard_as_break(self):
+        chunk = parse_chunk(make_loop_exit_guard_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if not keep then\n        break\n    end", source)
+        self.assertIn('print("body")', source)
+        self.assertNotIn("JUMPIFNOT", source)
+
+    def test_decompile_loop_exit_guard_uses_merged_boolean_register(self):
+        chunk = parse_chunk(make_loop_exit_guard_merged_boolean_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if not keep then\n        break\n    end", source)
+        self.assertNotIn("if not false", source)
+        self.assertNotIn("if not true", source)
+
+    def test_decompile_return_guard_exits_parent_branch(self):
+        chunk = parse_chunk(make_return_guard_exits_parent_branch_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if mode then", source)
+        self.assertIn("if done then\n        return\n    end", source)
+        self.assertIn('print("run")', source)
+        self.assertIn('else\n    print("else")\nend', source)
+        self.assertNotIn("JUMPIF", source)
+
+    def test_decompile_contained_if_in_terminating_else(self):
+        chunk = parse_chunk(make_contained_if_in_terminating_else_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if guard then", source)
+        self.assertIn("if looped then\n            return\n        end", source)
+        self.assertIn('print("body")', source)
+        self.assertIn('print("after")', source)
+        self.assertNotIn("JUMPIFNOT", source)
 
     def test_decompile_constant_comparison_if_block(self):
         chunk = parse_chunk(make_constant_comparison_if_call_chunk())

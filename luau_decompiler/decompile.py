@@ -268,6 +268,38 @@ def _may_have_constructor_side_effect(value: str) -> bool:
     return "(" in source and ")" in source
 
 
+def _table_source(entries: list[str]) -> str:
+    if not entries:
+        return "{}"
+
+    inline = "{" + ", ".join(entries) + "}"
+    if len(entries) <= 6 and "\n" not in inline and len(inline) <= 120:
+        return inline
+
+    lines = ["{"]
+    if not any("\n" in entry for entry in entries):
+        row = ""
+        for entry in entries:
+            item = f"{entry},"
+            candidate = item if not row else f"{row} {item}"
+            if row and len(f"    {candidate}") > 120:
+                lines.append(f"    {row}")
+                row = item
+            else:
+                row = candidate
+        if row:
+            lines.append(f"    {row}")
+        lines.append("}")
+        return "\n".join(lines)
+
+    for entry in entries:
+        entry_lines = entry.splitlines() or [""]
+        entry_lines[-1] = f"{entry_lines[-1]},"
+        lines.extend(f"    {line}" if line else "    " for line in entry_lines)
+    lines.append("}")
+    return "\n".join(lines)
+
+
 @dataclass
 class TableLiteral:
     array: dict[int, str] = field(default_factory=dict)
@@ -309,7 +341,7 @@ class TableLiteral:
                         entries.append(f"[{index}] = {value}")
                 else:
                     entries.append(f"{key} = {value}")
-            return "{" + ", ".join(entries) + "}"
+            return _table_source(entries)
 
         entries = []
         next_index = 1
@@ -321,7 +353,7 @@ class TableLiteral:
                 entries.append(f"[{index}] = {value}")
             next_index = index + 1
         entries.extend(f"{key} = {value}" for key, value in self.fields)
-        return "{" + ", ".join(entries) + "}"
+        return _table_source(entries)
 
 
 def _table_field_key(key: str) -> str:
@@ -576,6 +608,38 @@ def decompile_proto(
             if target >= proto.numparams and key not in declared_locals:
                 return False
             names.append(local_name)
+
+        emit_line(indent, f"{', '.join(names)} = {value}")
+        for offset, local_name in enumerate(names):
+            set_reg(reg_id + offset, local_name)
+        return True
+
+    def assign_mixed_multi_result_locals(reg_id: int, count: int, value: str, pc: int, indent: int) -> bool:
+        names = []
+        missing = []
+        for offset in range(count):
+            target = reg_id + offset
+            if target < proto.numparams:
+                return False
+
+            local_name = _debug_local_name(proto, target, pc)
+            if local_name is None:
+                current = reg(target)
+                key = local_key(target, current, pc) if _is_identifier(current) else None
+                if key is not None and key in declared_locals:
+                    local_name = current
+            if local_name is None:
+                local_name = f"r{target}"
+
+            key = local_key(target, local_name, pc)
+            names.append(local_name)
+            if key not in declared_locals:
+                missing.append((local_name, key))
+
+        if missing:
+            emit_line(indent, f"local {', '.join(name for name, _ in missing)} = nil")
+            for _, key in missing:
+                declared_locals.add(key)
 
         emit_line(indent, f"{', '.join(names)} = {value}")
         for offset, local_name in enumerate(names):
@@ -959,6 +1023,102 @@ def decompile_proto(
                     return index
                 index += 1
             return None
+
+        def call_condition_prefix_any(index: int) -> tuple[int, str, int] | None:
+            temp_regs = dict(regs)
+            temp_namecalls: dict[int, tuple[str, str]] = {}
+
+            def temp_reg(reg_id: int) -> str:
+                return temp_regs.get(reg_id, reg(reg_id))
+
+            def temp_condition(insn) -> str | None:
+                name = insn.op.name
+                if name == "JUMPIF":
+                    return _unary_expr("not", temp_reg(insn.a))
+                if name == "JUMPIFNOT":
+                    return temp_reg(insn.a)
+                if name in _REGISTER_COMPARE_FALLTHROUGH_OPS and insn.aux is not None:
+                    return _binary_expr(
+                        temp_reg(insn.a),
+                        _REGISTER_COMPARE_FALLTHROUGH_OPS[name],
+                        temp_reg(insn.aux & 0xFF),
+                    )
+                if name in _CONSTANT_COMPARE_OPS and insn.aux is not None:
+                    not_flag = bool(insn.aux & 0x80000000)
+                    operator = "==" if not_flag else "~="
+                    if name == "JUMPXEQKNIL":
+                        value = "nil"
+                    elif name == "JUMPXEQKB":
+                        value = "true" if insn.aux & 1 else "false"
+                    else:
+                        value = _literal(proto, insn.aux & 0xFFFFFF)
+                    return _binary_expr(temp_reg(insn.a), operator, value)
+                return None
+
+            scan = index
+            while scan < len(instructions):
+                candidate = instructions[scan]
+                name = candidate.op.name
+                if name in _CONDITIONAL_JUMP_OPS:
+                    condition = temp_condition(candidate)
+                    next_index = pc_to_index.get(candidate.next_pc)
+                    target = candidate.jump_target
+                    if condition is None or next_index is None or target is None:
+                        return None
+                    return next_index, condition, target
+                if name == "GETIMPORT" and candidate.aux is not None:
+                    temp_regs[candidate.a] = _import_path_expr(proto, candidate.aux)
+                elif name == "GETGLOBAL" and candidate.aux is not None:
+                    key = proto.constant_text(candidate.aux) or f"K{candidate.aux}"
+                    temp_regs[candidate.a] = _global_expr(key)
+                elif name == "LOADK":
+                    temp_regs[candidate.a] = _literal(proto, candidate.d)
+                elif name == "LOADKX" and candidate.aux is not None:
+                    temp_regs[candidate.a] = _literal(proto, candidate.aux)
+                elif name == "LOADN":
+                    temp_regs[candidate.a] = str(candidate.d)
+                elif name == "LOADB" and not candidate.c:
+                    temp_regs[candidate.a] = "true" if candidate.b else "false"
+                elif name == "MOVE":
+                    temp_regs[candidate.a] = temp_reg(candidate.b)
+                elif name in {"GETTABLEKS", "GETUDATAKS"} and candidate.aux is not None:
+                    key_index = _aux_key_index(name, candidate.aux)
+                    key = proto.constant_text(key_index) or f"K{key_index}"
+                    temp_regs[candidate.a] = _field_expr(temp_reg(candidate.b), key)
+                elif name == "GETTABLE":
+                    temp_regs[candidate.a] = _index_expr(temp_reg(candidate.b), temp_reg(candidate.c))
+                elif name == "GETTABLEN":
+                    temp_regs[candidate.a] = f"{temp_reg(candidate.b)}[{candidate.c + 1}]"
+                elif name in {"NAMECALL", "NAMECALLUDATA"} and candidate.aux is not None:
+                    key_index = _aux_key_index(name, candidate.aux)
+                    method = proto.constant_text(key_index) or f"K{key_index}"
+                    temp_namecalls[candidate.a] = (temp_reg(candidate.b), method)
+                elif name in {"CALL", "CALLFB"}:
+                    pending = temp_namecalls.pop(candidate.a, None)
+                    if pending:
+                        receiver, method = pending
+                        args = [temp_reg(candidate.a + 2 + offset) for offset in range(max(candidate.b - 2, 0))]
+                        call = _namecall_expr(receiver, method, args)
+                    else:
+                        args = [temp_reg(candidate.a + 1 + offset) for offset in range(max(candidate.b - 1, 0))]
+                        call = _call_expr(temp_reg(candidate.a), args)
+                    result_count = candidate.c - 1 if candidate.c else 0
+                    if result_count != 1:
+                        return None
+                    temp_regs[candidate.a] = call
+                else:
+                    return None
+                scan += 1
+            return None
+
+        def call_condition_prefix(index: int, target_pc: int) -> tuple[int, str] | None:
+            prefix = call_condition_prefix_any(index)
+            if prefix is None:
+                return None
+            next_index, condition, target = prefix
+            if target != target_pc:
+                return None
+            return next_index, condition
 
         def condition_chain_source(conditions: list[str], operator: str) -> str:
             return f" {operator} ".join(_group_if_needed(condition) for condition in conditions)
@@ -1682,6 +1842,23 @@ def decompile_proto(
                         current_index = following_index
                         continue
 
+                    prefix = call_condition_prefix_any(current_index)
+                    if prefix is not None:
+                        prefix_body_index, prefix_condition, prefix_end_pc = prefix
+                        prefix_end_index = pc_to_index.get(prefix_end_pc)
+                        if (
+                            prefix_body_index == body_index
+                            and prefix_end_index is not None
+                            and prefix_end_pc > body_pc
+                            and (expected_end_pc is None or prefix_end_pc == expected_end_pc)
+                            and not (
+                                prefix_end_index > body_index
+                                and instructions[prefix_end_index - 1].op.name == "JUMPBACK"
+                            )
+                        ):
+                            conditions.append(prefix_condition)
+                            return condition_chain_source(conditions, "or"), body_index, prefix_end_index
+
                     final_condition = jump_fallthrough_condition(candidate)
                     end_pc = candidate.jump_target
                     end_index = pc_to_index.get(end_pc) if end_pc is not None else None
@@ -1924,6 +2101,23 @@ def decompile_proto(
                         conditions.append(next_condition)
                         current_index = following_index
                         continue
+
+                    prefix = call_condition_prefix_any(current_index)
+                    if prefix is not None:
+                        prefix_body_index, prefix_condition, prefix_end_pc = prefix
+                        prefix_end_index = pc_to_index.get(prefix_end_pc)
+                        if (
+                            prefix_body_index == body_index
+                            and prefix_end_index is not None
+                            and prefix_end_pc > body_pc
+                            and (expected_end_pc is None or prefix_end_pc == expected_end_pc)
+                            and not (
+                                prefix_end_index > body_index
+                                and instructions[prefix_end_index - 1].op.name == "JUMPBACK"
+                            )
+                        ):
+                            conditions.append(prefix_condition)
+                            return condition_chain_source(conditions, "or"), body_index, prefix_end_index
 
                     final_condition = jump_fallthrough_condition(candidate)
                     end_pc = candidate.jump_target
@@ -2419,17 +2613,31 @@ def decompile_proto(
                             guard = instructions[guard_index]
                             guard_condition = jump_fallthrough_condition(guard)
                             next_guard_index = pc_to_index.get(guard.next_pc)
+                            guard_is_condition = guard.op.name in _CONDITIONAL_JUMP_OPS
+                            guard_target = guard.jump_target
+                            guard_next_pc = guard.next_pc
+                            if guard_condition is None:
+                                prefix = call_condition_prefix(guard_index, target)
+                                if prefix is not None:
+                                    next_guard_index, guard_condition = prefix
+                                    guard_is_condition = True
+                                    guard_target = target
+                                    guard_next_pc = instructions[next_guard_index].pc if next_guard_index < len(instructions) else target
                             if (
-                                guard.op.name not in _CONDITIONAL_JUMP_OPS
+                                not guard_is_condition
                                 or guard_condition is None
-                                or guard.jump_target != target
-                                or guard.next_pc >= target
+                                or guard_target != target
+                                or guard_next_pc >= target
                                 or next_guard_index is None
                             ):
                                 break
                             loop_conditions.append(guard_condition)
                             loop_body_index = next_guard_index
                             guard_index = next_guard_index
+
+                        if len(loop_conditions) > 1:
+                            condition = condition_chain_source(loop_conditions, "and")
+                            body_index = loop_body_index
 
                         maybe_backedge = instructions[target_index - 1]
                         backedge_target = maybe_backedge.jump_target
@@ -2760,6 +2968,14 @@ def decompile_proto(
                     elif result_count > 1 and declare_multi_result_locals(insn.a, result_count, call, insn.next_pc, indent):
                         pass
                     elif result_count > 1 and assign_multi_result_locals(insn.a, result_count, call, insn.next_pc, indent):
+                        pass
+                    elif result_count > 1 and assign_mixed_multi_result_locals(
+                        insn.a,
+                        result_count,
+                        call,
+                        insn.next_pc,
+                        indent,
+                    ):
                         pass
                     elif pending and result_count == 1:
                         service_name = inferred_service_name(receiver, method, args)

@@ -9,3 +9,4 @@ license = "MIT"
 [project.scripts]
 flow-decompiler = "luau_decompiler.cli:main"
 luau-decompiler = "luau_decompiler.cli:main"
+flow-decompiler-ui = "luau_decompiler.ui:main"

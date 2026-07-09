@@ -6,7 +6,7 @@ import json
 import math
 import queue
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -271,10 +271,38 @@ def render_file(path: str | Path, mode: str = "decompile", proto: int | None = N
     return render_bytes(_load_bytes(Path(path)), mode, proto)
 
 
+@dataclass(frozen=True)
+class ActiveSource:
+    source: Path | str | None
+    path: Path | None
+    input_text: str
+    label: str
+
+
+def _active_source(
+    path: Path | None,
+    current_text: str,
+    input_text: str,
+    *,
+    output_is_result: bool,
+) -> ActiveSource:
+    pasted = current_text.strip()
+    if pasted and not output_is_result:
+        return ActiveSource(pasted, None, pasted, "pasted input")
+    if path is not None:
+        return ActiveSource(path, path, input_text, path.name)
+    if input_text:
+        return ActiveSource(input_text, None, input_text, "pasted input")
+    return ActiveSource(None, None, "", "")
+
+
 class FlowDecompilerApp:
     def __init__(self, root: tk.Tk, initial_file: str | None = None) -> None:
         self.root = root
         self.path: Path | None = Path(initial_file) if initial_file else None
+        self.input_text = ""
+        self.output_is_result = False
+        self.updating_output = False
         self.mode = tk.StringVar(value="decompile")
         self.status = tk.StringVar(value="Ready")
         self.file_label = tk.StringVar(value=self.path.name if self.path else "No file selected")
@@ -379,6 +407,7 @@ class FlowDecompilerApp:
             font=("Cascadia Mono", 10),
         )
         self.output.pack(side="left", fill="both", expand=True)
+        self.output.bind("<<Modified>>", self._on_text_modified)
 
         yscroll = AutoScrollbar(
             body,
@@ -495,6 +524,20 @@ class FlowDecompilerApp:
         else:
             self.loader.stop()
 
+    def _on_text_modified(self, _event: tk.Event[tk.Widget]) -> None:
+        if not self.output.edit_modified():
+            return
+        if not self.updating_output:
+            text = self.output.get("1.0", "end-1c").strip()
+            self.output_is_result = False
+            if text:
+                self.path = None
+                self.file_label.set("Pasted input")
+            elif self.path is None:
+                self.input_text = ""
+                self.file_label.set("No file selected")
+        self.output.edit_modified(False)
+
     def _open(self) -> None:
         selected = filedialog.askopenfilename(
             title="Open bytecode",
@@ -506,23 +549,31 @@ class FlowDecompilerApp:
         if not selected:
             return
         self.path = Path(selected)
+        self.input_text = ""
+        self.output_is_result = True
         self.file_label.set(str(self.path))
         self._run()
 
     def _run(self) -> None:
-        pasted = self.output.get("1.0", "end-1c").strip()
-        if not self.path and not pasted:
+        state = _active_source(
+            self.path,
+            self.output.get("1.0", "end-1c"),
+            self.input_text,
+            output_is_result=self.output_is_result,
+        )
+        if state.source is None:
             self.status.set("Open a file or paste bytecode")
             return
 
+        self.path = state.path
+        self.input_text = state.input_text
+        self.file_label.set(str(self.path) if self.path else ("Pasted input" if self.input_text else "No file selected"))
         self.render_token += 1
         token = self.render_token
-        source = self.path if self.path else pasted
-        label = self.path.name if self.path else "pasted input"
         mode = self.mode.get()
-        self._set_busy(True, f"{label} -> {mode}")
+        self._set_busy(True, f"{state.label} -> {mode}")
 
-        thread = threading.Thread(target=self._render_worker, args=(token, source, label, mode), daemon=True)
+        thread = threading.Thread(target=self._render_worker, args=(token, state.source, state.label, mode), daemon=True)
         thread.start()
         self.root.after(40, self._poll_render)
 
@@ -550,8 +601,12 @@ class FlowDecompilerApp:
             self.status.set("Error")
             messagebox.showerror("Flow Decompiler", error)
             return
+        self.updating_output = True
         self.output.delete("1.0", "end")
         self.output.insert("1.0", output)
+        self.output.edit_modified(False)
+        self.updating_output = False
+        self.output_is_result = True
 
     def _save(self) -> None:
         text = self.output.get("1.0", "end-1c")
@@ -578,7 +633,14 @@ class FlowDecompilerApp:
         self.status.set("Copied")
 
     def _clear(self) -> None:
+        self.updating_output = True
         self.output.delete("1.0", "end")
+        self.output.edit_modified(False)
+        self.updating_output = False
+        self.path = None
+        self.input_text = ""
+        self.output_is_result = False
+        self.file_label.set("No file selected")
         self.status.set("Cleared")
 
 

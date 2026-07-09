@@ -3,7 +3,7 @@ import unittest
 import base64
 
 from luau_decompiler.chunk import parse_chunk
-from luau_decompiler.decompile import decompile_chunk
+from luau_decompiler.decompile import TableLiteral, decompile_chunk
 from luau_decompiler.disasm import encode_abc, encode_ad, encode_e
 
 
@@ -5654,6 +5654,152 @@ def make_anonymous_multi_return_call_chunk():
     return bytes(out)
 
 
+def make_overlapping_multi_return_call_chunk():
+    strings = ["provider", "print"]
+    words = [
+        encode_ad("GETIMPORT", 0, 1),
+        import_id(0),
+        encode_abc("CALL", 0, 1, 3),
+        encode_ad("GETIMPORT", 1, 1),
+        import_id(0),
+        encode_abc("CALL", 1, 1, 3),
+        encode_ad("GETIMPORT", 3, 3),
+        import_id(2),
+        encode_abc("MOVE", 4, 1, 0),
+        encode_abc("MOVE", 5, 2, 0),
+        encode_abc("CALL", 3, 3, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(4)
+    out += struct.pack("<I", import_id(1))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_short_circuit_call_guard_else_chunk():
+    strings = ["flag", "sound", "AudioPlayer", "IsA", "Play", "Playing"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_ad("JUMPIFNOT", 0, 13),
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        1,
+        encode_ad("LOADK", 2, 2),
+        encode_abc("NAMECALL", 0, 0, 0),
+        3,
+        encode_abc("CALL", 0, 3, 2),
+        encode_ad("JUMPIFNOT", 0, 6),
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        1,
+        encode_abc("NAMECALL", 0, 0, 0),
+        4,
+        encode_abc("CALL", 0, 2, 1),
+        encode_ad("JUMP", 0, 5),
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        1,
+        encode_abc("LOADB", 1, 1, 0),
+        encode_abc("SETTABLEKS", 1, 0, 0),
+        5,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(6)
+    for string_id in range(1, 7):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_short_circuit_or_call_guard_chunk():
+    strings = ["sound", "TextLabel", "TextButton", "IsA", "TextColor3"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_ad("LOADK", 2, 1),
+        encode_abc("NAMECALL", 0, 0, 0),
+        3,
+        encode_abc("CALL", 0, 3, 2),
+        encode_ad("JUMPIF", 0, 7),
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_ad("LOADK", 2, 2),
+        encode_abc("NAMECALL", 0, 0, 0),
+        3,
+        encode_abc("CALL", 0, 3, 2),
+        encode_ad("JUMPIFNOT", 0, 5),
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_ad("LOADN", 1, 1),
+        encode_abc("SETTABLEKS", 1, 0, 0),
+        4,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(5)
+    for string_id in range(1, 6):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_table_open_call_chunk():
     strings = ["provider", "print"]
     words = [
@@ -6896,6 +7042,44 @@ class ChunkTests(unittest.TestCase):
         self.assertIn("local r0, r1 = provider()\nprint(r0, r1)", source)
         self.assertNotIn("print(provider(), r1)", source)
 
+    def test_decompile_overlapping_multi_return_call_declares_missing_result(self):
+        chunk = parse_chunk(make_overlapping_multi_return_call_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0, r1 = provider()", source)
+        self.assertIn("local r2 = nil\nr1, r2 = provider()\nprint(r1, r2)", source)
+        self.assertNotIn("print(provider(), r2)", source)
+        self.assertNotIn("print(r1, provider)", source)
+
+    def test_decompile_short_circuit_call_guard_else(self):
+        chunk = parse_chunk(make_short_circuit_call_guard_else_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'if flag and sound:IsA("AudioPlayer") then\n'
+            "    sound:Play()\n"
+            "else\n"
+            "    sound.Playing = true\n"
+            "end",
+            source,
+        )
+        self.assertNotIn("JUMPIFNOT", source)
+
+    def test_decompile_short_circuit_or_call_guard(self):
+        chunk = parse_chunk(make_short_circuit_or_call_guard_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'if sound:IsA("TextLabel") or sound:IsA("TextButton") then\n'
+            "    sound.TextColor3 = 1\n"
+            "end",
+            source,
+        )
+        self.assertNotIn("JUMPIFNOT", source)
+
     def test_decompile_table_literal_preserves_open_call_setlist(self):
         chunk = parse_chunk(make_table_open_call_chunk())
 
@@ -6903,6 +7087,20 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("print({provider()})", source)
         self.assertNotIn("print({})", source)
+
+    def test_large_table_literal_renders_multiline(self):
+        table = TableLiteral()
+        for index in range(1, 8):
+            table.set_array(index, str(index))
+
+        source = table.render()
+
+        self.assertEqual(
+            source,
+            "{\n"
+            "    1, 2, 3, 4, 5, 6, 7,\n"
+            "}",
+        )
 
     def test_live_roblox_encoded_opcode_chunk_is_preserved(self):
         raw = base64.b64decode("CQMAAAEAAAABAgACowAAAIIAAQAAAAEAARgAAAEAAAAAAA==")

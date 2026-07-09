@@ -27,6 +27,7 @@ After install:
 
 ```powershell
 flow-decompiler path\to\bytecode.b64
+flow-decompiler-ui
 ```
 
 `.b64`, `.base64`, and `.txt` inputs are read as base64 text. Other inputs are read as raw bytecode.
@@ -45,6 +46,27 @@ Then decompile the saved file:
 
 ```powershell
 flow-decompiler target.bytecode.b64
+```
+
+For local live captures, start the receiver:
+
+```powershell
+python tools\receive_bytecode.py --out live_samples --count 1
+```
+
+Then POST base64 bytecode to `http://127.0.0.1:18765`. The helper writes each POST body as a `.b64` file, using the optional `x-sample-name` header for the filename.
+
+Captured `.b64` files can be opened in the UI:
+
+```powershell
+python -m luau_decompiler.ui live_samples\target.bytecode.b64
+```
+
+They can also be used with the CLI:
+
+```powershell
+flow-decompiler live_samples\target.bytecode.b64
+flow-decompiler live_samples\target.bytecode.b64 --disasm
 ```
 
 ## What It Handles

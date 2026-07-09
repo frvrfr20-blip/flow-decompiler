@@ -3973,6 +3973,49 @@ def make_short_circuit_branch_assignment_before_conditional_overwrite_chunk():
     return bytes(out)
 
 
+def make_conditional_value_with_guarded_fallback_chunk():
+    strings = ["print"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 4),
+        encode_abc("GETUPVAL", 4, 0, 0),
+        encode_abc("DIV", 3, 4, 2),
+        encode_ad("JUMPIF", 3, 1),
+        encode_ad("LOADK", 3, 2),
+        encode_ad("GETIMPORT", 4, 1),
+        import_id(0),
+        encode_abc("MOVE", 5, 3, 0),
+        encode_abc("CALL", 4, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 3, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(9)
+    out.append(0)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -7584,6 +7627,23 @@ class ChunkTests(unittest.TestCase):
         )
         self.assertNotIn("\nif p1 ~= nil and p1 == false then\nend", source)
         self.assertNotIn("JUMPXEQ", source)
+
+    def test_decompile_conditional_value_with_guarded_fallback(self):
+        chunk = parse_chunk(make_conditional_value_with_guarded_fallback_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local r3 = 1\n"
+            "if p0 then\n"
+            "    r3 = upvalue0 / p2\n"
+            "    r3 = r3 or 1\n"
+            "end\n"
+            "print(r3)",
+            source,
+        )
+        self.assertNotIn("\nif p0 then\nend", source)
+        self.assertNotIn("JUMPIF", source)
 
     def test_decompile_constant_comparison_if_block(self):
         chunk = parse_chunk(make_constant_comparison_if_call_chunk())

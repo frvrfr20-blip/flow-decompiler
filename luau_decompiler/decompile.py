@@ -1187,6 +1187,8 @@ def decompile_proto(
             if end_index is None:
                 return
 
+            guard_scan_start = min((start for start, _end_pc in ranges), default=end_index)
+
             def next_register_read_index(start_index: int, reg_id: int) -> int | None:
                 for scan_index in range(start_index, len(instructions)):
                     if instruction_reads_register(instructions[scan_index], reg_id):
@@ -1196,7 +1198,7 @@ def decompile_proto(
             def instruction_can_be_skipped_before_read(instruction_index: int, read_index: int) -> bool:
                 instruction_pc = instructions[instruction_index].pc
                 read_pc = instructions[read_index].pc
-                for guard_index in range(end_index, instruction_index):
+                for guard_index in range(guard_scan_start, instruction_index):
                     guard = instructions[guard_index]
                     target = guard.jump_target
                     if (
@@ -1224,6 +1226,31 @@ def decompile_proto(
                             continue
                         return False
                 return False
+
+            def guarded_fallback_value(reg_id: int) -> str | None:
+                for start, end_pc in ranges:
+                    range_end_index = pc_to_index.get(end_pc)
+                    if range_end_index is None or range_end_index <= start:
+                        continue
+                    fallback_index = range_end_index - 1
+                    fallback = simple_assignment_source(instructions[fallback_index])
+                    if fallback is None:
+                        continue
+                    fallback_reg, fallback_source = fallback
+                    if fallback_reg != reg_id:
+                        continue
+                    fallback_pc = instructions[fallback_index].pc
+                    for guard_index in range(start, fallback_index):
+                        guard = instructions[guard_index]
+                        target = guard.jump_target
+                        if (
+                            guard.op.name in _CONDITIONAL_JUMP_OPS
+                            and target is not None
+                            and guard.next_pc <= fallback_pc < target
+                            and target >= end_pc
+                        ):
+                            return fallback_source
+                return None
 
             liveout_regs: list[int] = []
             seen: set[int] = set()
@@ -1255,7 +1282,9 @@ def decompile_proto(
                 already_declared = reg_id < proto.numparams or key in declared_locals or local_name in inferred_locals
                 current = reg(reg_id)
                 if not already_declared:
-                    initial = "nil" if current == local_name else current
+                    initial = guarded_fallback_value(reg_id) if current == local_name else current
+                    if initial is None:
+                        initial = "nil"
                     emit_line(indent, f"local {local_name} = {initial}")
                     if debug_name is not None:
                         declared_locals.add(key)
@@ -2952,6 +2981,19 @@ def decompile_proto(
                                 has_else = True
                                 branch_stop_pc = target
                                 end_pc = else_end_pc
+
+                        if not has_else and target_index > body_index and target_index < len(instructions):
+                            maybe_skip = instructions[target_index - 1]
+                            fallback = simple_assignment_source(instructions[target_index])
+                            fallback_end_pc = instructions[target_index].next_pc
+                            if (
+                                fallback is not None
+                                and maybe_skip.op.name in {"JUMPIF", "JUMPIFNOT"}
+                                and maybe_skip.a == fallback[0]
+                                and maybe_skip.jump_target == fallback_end_pc
+                            ):
+                                branch_stop_pc = fallback_end_pc
+                                end_pc = fallback_end_pc
 
                     ranges = [(body_index, branch_stop_pc)]
                     if has_else:

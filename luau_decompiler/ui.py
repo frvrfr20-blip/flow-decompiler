@@ -76,7 +76,6 @@ class FlowDecompilerApp:
         self.root = root
         self.path: Path | None = Path(initial_file) if initial_file else None
         self.mode = tk.StringVar(value="decompile")
-        self.proto = tk.StringVar(value="auto")
         self.status = tk.StringVar(value="Ready")
         self.file_label = tk.StringVar(value=self.path.name if self.path else "No file selected")
         self.mode_buttons: dict[str, tk.Button] = {}
@@ -147,30 +146,6 @@ class FlowDecompilerApp:
             button = self._button(mode_bar, label, lambda value=mode: self._set_mode(value), "mode")
             button.pack(side="left", padx=(0, 1))
             self.mode_buttons[mode] = button
-
-        tk.Label(
-            controls,
-            text="proto",
-            bg=UI_COLORS["panel"],
-            fg=UI_COLORS["muted"],
-            font=("Segoe UI", 9),
-        ).pack(side="left", padx=(14, 6))
-        proto_entry = tk.Entry(
-            controls,
-            width=6,
-            textvariable=self.proto,
-            bg=UI_COLORS["output"],
-            fg=UI_COLORS["text"],
-            insertbackground=UI_COLORS["text"],
-            relief="flat",
-            bd=0,
-            highlightbackground=UI_COLORS["line"],
-            highlightcolor=UI_COLORS["accent"],
-            highlightthickness=1,
-            font=("Cascadia Mono", 9),
-        )
-        proto_entry.pack(side="left", ipady=4)
-        proto_entry.bind("<Return>", lambda _event: self._run())
 
         self._button(controls, "Run", self._run, "accent").pack(side="right")
         self._button(controls, "Clear", self._clear).pack(side="right", padx=(0, 8))
@@ -294,15 +269,6 @@ class FlowDecompilerApp:
             else:
                 button.configure(bg=UI_COLORS["panel"], fg=UI_COLORS["muted"])
 
-    def _parse_proto(self) -> int | None:
-        value = self.proto.get().strip().lower()
-        if value in {"", "auto"}:
-            return None
-        try:
-            return int(value)
-        except ValueError as exc:
-            raise ValueError("Proto must be an integer or auto") from exc
-
     def _set_mode(self, mode: str) -> None:
         self.mode.set(mode)
         self._refresh_mode_buttons()
@@ -327,7 +293,7 @@ class FlowDecompilerApp:
             self.status.set("Open a bytecode file first")
             return
         try:
-            output = render_file(self.path, self.mode.get(), self._parse_proto())
+            output = render_file(self.path, self.mode.get())
         except Exception as exc:  # UI boundary: show parser/decompiler failures without closing the app.
             self.status.set("Error")
             messagebox.showerror("Flow Decompiler", str(exc))

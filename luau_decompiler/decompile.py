@@ -1145,6 +1145,8 @@ def decompile_proto(
                     if result_count != 1:
                         return None
                     temp_regs[candidate.a] = call
+                elif name in FASTCALL_OPS:
+                    pass
                 else:
                     return None
                 scan += 1
@@ -2225,6 +2227,238 @@ def decompile_proto(
 
             return None
 
+        def folded_guarded_or_fallback_if_index(insn, indent: int) -> int | None:
+            nonlocal open_results
+
+            outer_condition = jump_fallthrough_condition(insn)
+            fallback_pc = insn.jump_target
+            body_index = pc_to_index.get(insn.next_pc)
+            fallback_index = pc_to_index.get(fallback_pc) if fallback_pc is not None else None
+            if (
+                outer_condition is None
+                or fallback_pc is None
+                or body_index is None
+                or fallback_index is None
+                or fallback_pc <= insn.next_pc
+            ):
+                return None
+
+            def temp_prefix_condition(
+                start_index: int,
+                limit_pc: int,
+            ) -> tuple[int, int, str, str, int] | None:
+                temp_regs = dict(regs)
+                temp_namecalls: dict[int, tuple[str, str]] = {}
+                scan = start_index
+
+                def temp_reg(reg_id: int) -> str:
+                    return temp_regs.get(reg_id, reg(reg_id))
+
+                def temp_fallthrough_condition(candidate) -> str | None:
+                    name = candidate.op.name
+                    if name == "JUMPIF":
+                        return _unary_expr("not", temp_reg(candidate.a))
+                    if name == "JUMPIFNOT":
+                        return temp_reg(candidate.a)
+                    if name in _REGISTER_COMPARE_FALLTHROUGH_OPS and candidate.aux is not None:
+                        return _binary_expr(
+                            temp_reg(candidate.a),
+                            _REGISTER_COMPARE_FALLTHROUGH_OPS[name],
+                            temp_reg(candidate.aux & 0xFF),
+                        )
+                    if name in _CONSTANT_COMPARE_OPS and candidate.aux is not None:
+                        not_flag = bool(candidate.aux & 0x80000000)
+                        operator = "==" if not_flag else "~="
+                        if name == "JUMPXEQKNIL":
+                            value = "nil"
+                        elif name == "JUMPXEQKB":
+                            value = "true" if candidate.aux & 1 else "false"
+                        else:
+                            value = _literal(proto, candidate.aux & 0xFFFFFF)
+                        return _binary_expr(temp_reg(candidate.a), operator, value)
+                    return None
+
+                def temp_taken_condition(candidate) -> str | None:
+                    name = candidate.op.name
+                    if name == "JUMPIF":
+                        return temp_reg(candidate.a)
+                    if name == "JUMPIFNOT":
+                        return _unary_expr("not", temp_reg(candidate.a))
+                    if name in _REGISTER_COMPARE_TAKEN_OPS and candidate.aux is not None:
+                        return _binary_expr(
+                            temp_reg(candidate.a),
+                            _REGISTER_COMPARE_TAKEN_OPS[name],
+                            temp_reg(candidate.aux & 0xFF),
+                        )
+                    if name in _CONSTANT_COMPARE_OPS and candidate.aux is not None:
+                        not_flag = bool(candidate.aux & 0x80000000)
+                        operator = "~=" if not_flag else "=="
+                        if name == "JUMPXEQKNIL":
+                            value = "nil"
+                        elif name == "JUMPXEQKB":
+                            value = "true" if candidate.aux & 1 else "false"
+                        else:
+                            value = _literal(proto, candidate.aux & 0xFFFFFF)
+                        return _binary_expr(temp_reg(candidate.a), operator, value)
+                    return None
+
+                while scan < len(instructions):
+                    candidate = instructions[scan]
+                    name = candidate.op.name
+                    if candidate.pc >= limit_pc:
+                        return None
+                    if name in _CONDITIONAL_JUMP_OPS:
+                        next_index = pc_to_index.get(candidate.next_pc)
+                        target = candidate.jump_target
+                        taken = temp_taken_condition(candidate)
+                        fallthrough = temp_fallthrough_condition(candidate)
+                        if next_index is None or target is None or taken is None or fallthrough is None:
+                            return None
+                        return scan, next_index, taken, fallthrough, target
+                    if name == "GETIMPORT" and candidate.aux is not None:
+                        temp_regs[candidate.a] = _import_path_expr(proto, candidate.aux)
+                    elif name == "GETGLOBAL" and candidate.aux is not None:
+                        key = proto.constant_text(candidate.aux) or f"K{candidate.aux}"
+                        temp_regs[candidate.a] = _global_expr(key)
+                    elif name == "LOADK":
+                        temp_regs[candidate.a] = _literal(proto, candidate.d)
+                    elif name == "LOADKX" and candidate.aux is not None:
+                        temp_regs[candidate.a] = _literal(proto, candidate.aux)
+                    elif name == "LOADN":
+                        temp_regs[candidate.a] = str(candidate.d)
+                    elif name == "LOADB" and not candidate.c:
+                        temp_regs[candidate.a] = "true" if candidate.b else "false"
+                    elif name == "LOADNIL":
+                        temp_regs[candidate.a] = "nil"
+                    elif name == "MOVE":
+                        temp_regs[candidate.a] = temp_reg(candidate.b)
+                    elif name == "GETUPVAL":
+                        temp_regs[candidate.a] = _upvalue_name(proto, candidate.b, upvalue_names)
+                    elif name in {"GETTABLEKS", "GETUDATAKS"} and candidate.aux is not None:
+                        key_index = _aux_key_index(name, candidate.aux)
+                        key = proto.constant_text(key_index) or f"K{key_index}"
+                        temp_regs[candidate.a] = _field_expr(temp_reg(candidate.b), key)
+                    elif name == "GETTABLE":
+                        temp_regs[candidate.a] = _index_expr(temp_reg(candidate.b), temp_reg(candidate.c))
+                    elif name == "GETTABLEN":
+                        temp_regs[candidate.a] = f"{temp_reg(candidate.b)}[{candidate.c + 1}]"
+                    elif name in {"NAMECALL", "NAMECALLUDATA"} and candidate.aux is not None:
+                        key_index = _aux_key_index(name, candidate.aux)
+                        method = proto.constant_text(key_index) or f"K{key_index}"
+                        temp_namecalls[candidate.a] = (temp_reg(candidate.b), method)
+                    elif name in {"CALL", "CALLFB"}:
+                        pending = temp_namecalls.pop(candidate.a, None)
+                        if pending:
+                            receiver, method = pending
+                            args = [
+                                temp_reg(candidate.a + 2 + offset)
+                                for offset in range(max(candidate.b - 2, 0))
+                            ]
+                            call = _namecall_expr(receiver, method, args)
+                        else:
+                            args = [
+                                temp_reg(candidate.a + 1 + offset)
+                                for offset in range(max(candidate.b - 1, 0))
+                            ]
+                            call = _call_expr(temp_reg(candidate.a), args)
+                        result_count = candidate.c - 1 if candidate.c else 0
+                        if result_count != 1:
+                            return None
+                        temp_regs[candidate.a] = call
+                    elif name in FASTCALL_OPS:
+                        pass
+                    else:
+                        return None
+                    scan += 1
+                return None
+
+            first = temp_prefix_condition(body_index, fallback_pc)
+            if first is None:
+                return None
+
+            first_jump_index, current_index, first_taken, _first_fallthrough, normal_pc = first
+            normal_index = pc_to_index.get(normal_pc)
+            if (
+                normal_index is None
+                or normal_pc <= fallback_pc
+                or first_jump_index >= fallback_index
+            ):
+                return None
+
+            normal_conditions = [first_taken]
+            while current_index != fallback_index:
+                if current_index is None or current_index >= fallback_index:
+                    return None
+                next_condition = temp_prefix_condition(current_index, fallback_pc)
+                if next_condition is None:
+                    return None
+                jump_index, current_index, taken, _fallthrough, target_pc = next_condition
+                if jump_index >= fallback_index or target_pc != normal_pc:
+                    return None
+                normal_conditions.append(taken)
+                if len(normal_conditions) > 4:
+                    return None
+
+            if len(normal_conditions) < 2:
+                return None
+
+            fallback_guard = instructions[fallback_index]
+            fallback_condition = jump_fallthrough_condition(fallback_guard)
+            end_pc = fallback_guard.jump_target
+            end_index = pc_to_index.get(end_pc) if end_pc is not None else None
+            fallback_body_index = pc_to_index.get(fallback_guard.next_pc)
+            if (
+                fallback_guard.op.name not in _CONDITIONAL_JUMP_OPS
+                or fallback_condition is None
+                or end_pc is None
+                or end_index is None
+                or fallback_body_index is None
+                or end_pc <= fallback_guard.next_pc
+                or normal_index >= end_index
+                or (stop_pc is not None and end_pc > stop_pc)
+            ):
+                return None
+
+            fallback_jump_index = None
+            join_pc = None
+            scan = fallback_body_index
+            while scan < min(normal_index, end_index):
+                candidate = instructions[scan]
+                target = candidate.jump_target
+                if (
+                    candidate.op.name in {"JUMP", "JUMPX"}
+                    and target is not None
+                    and normal_pc <= target <= end_pc
+                    and target in pc_to_index
+                ):
+                    fallback_jump_index = scan
+                    join_pc = target
+                    break
+                scan += 1
+
+            if fallback_jump_index is None or join_pc is None:
+                return None
+
+            join_index = pc_to_index[join_pc]
+            normal_or_condition = value_chain_source(normal_conditions, "or")
+            condition = condition_chain_source([outer_condition, normal_or_condition], "and")
+            saved = snapshot_state()
+
+            open_results = None
+            emit_line(indent, f"if {condition} then")
+            emit_range(normal_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
+
+            restore_state(saved)
+            open_results = None
+            emit_line(indent, f"elseif {fallback_condition} then")
+            fallback_jump = instructions[fallback_jump_index]
+            emit_range(fallback_body_index, fallback_jump.pc, indent + 1, loop_continue_pc, loop_exit_pc, join_pc)
+            emit_range(join_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
+            emit_line(indent, "end")
+
+            restore_state(saved)
+            return end_index
+
         def folded_short_circuit_if_index(insn) -> int | None:
             nonlocal open_results, regs, table_literals
 
@@ -2801,6 +3035,12 @@ def decompile_proto(
                     continue
 
                 folded_index = folded_while_or_loop_index(insn, indent)
+                if folded_index is not None:
+                    open_results = None
+                    index = folded_index
+                    continue
+
+                folded_index = folded_guarded_or_fallback_if_index(insn, indent)
                 if folded_index is not None:
                     open_results = None
                     index = folded_index

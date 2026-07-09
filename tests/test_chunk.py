@@ -4192,6 +4192,69 @@ def make_branch_table_alias_reassigns_parameter_chunk():
     return bytes(out)
 
 
+def make_guarded_or_with_truthy_fallback_chunk():
+    strings = ["value", "default", "sentinel", "type", "boolean", "out"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("GETGLOBAL", 1, 0, 0),
+        1,
+        encode_abc("GETGLOBAL", 2, 0, 0),
+        2,
+        encode_ad("JUMPIFEQ", 0, 15),
+        2,
+        encode_abc("FASTCALL1", 40, 0, 3),
+        encode_abc("MOVE", 4, 0, 0),
+        encode_ad("GETIMPORT", 3, 4),
+        import_id(3),
+        encode_abc("CALL", 3, 2, 2),
+        encode_ad("JUMPXEQKS", 3, 12),
+        0x80000000 | 5,
+        encode_abc("FASTCALL1", 40, 1, 3),
+        encode_abc("MOVE", 4, 1, 0),
+        encode_ad("GETIMPORT", 3, 4),
+        import_id(3),
+        encode_abc("CALL", 3, 2, 2),
+        encode_ad("JUMPXEQKS", 3, 5),
+        5,
+        encode_ad("JUMPIFNOT", 0, 5),
+        encode_abc("MOVE", 0, 2, 0),
+        encode_ad("JUMP", 0, 1),
+        encode_ad("JUMP", 0, 2),
+        encode_abc("SETGLOBAL", 0, 0, 0),
+        6,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(7)
+    for string_id in (1, 2, 3, 4):
+        out.append(3)
+        out += varint(string_id)
+    out.append(4)
+    out += struct.pack("<I", import_id(3))
+    for string_id in (5, 6):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -7852,6 +7915,22 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("if p1 then\n    p0 = {p0}\nend\nprint(p0)", source)
         self.assertNotIn("\nif p1 then\nend", source)
+
+    def test_decompile_guarded_or_with_truthy_fallback(self):
+        chunk = parse_chunk(make_guarded_or_with_truthy_fallback_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'if value ~= sentinel and (type(value) ~= "boolean" or type(default) == "boolean") then\n'
+            "    out = value\n"
+            "elseif value then\n"
+            "    out = sentinel\n"
+            "end",
+            source,
+        )
+        self.assertNotIn('if type(default) ~= "boolean" then\n    end', source)
+        self.assertNotIn("JUMPXEQKS", source)
 
     def test_decompile_constant_comparison_if_block(self):
         chunk = parse_chunk(make_constant_comparison_if_call_chunk())

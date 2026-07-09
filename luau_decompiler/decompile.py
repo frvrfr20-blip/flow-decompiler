@@ -1179,6 +1179,94 @@ def decompile_proto(
                         seen.add(resolved_reg_id)
                     scan += 1
 
+        def materialize_branch_liveout_registers(
+            ranges: list[tuple[int, int]],
+            end_index: int | None,
+            indent: int,
+        ) -> None:
+            if end_index is None:
+                return
+
+            def next_register_read_index(start_index: int, reg_id: int) -> int | None:
+                for scan_index in range(start_index, len(instructions)):
+                    if instruction_reads_register(instructions[scan_index], reg_id):
+                        return scan_index
+                return None
+
+            def instruction_can_be_skipped_before_read(instruction_index: int, read_index: int) -> bool:
+                instruction_pc = instructions[instruction_index].pc
+                read_pc = instructions[read_index].pc
+                for guard_index in range(end_index, instruction_index):
+                    guard = instructions[guard_index]
+                    target = guard.jump_target
+                    if (
+                        guard.op.name in _CONDITIONAL_JUMP_OPS
+                        and target is not None
+                        and guard.next_pc <= instruction_pc < target
+                        and target <= read_pc
+                    ):
+                        return True
+                return False
+
+            def has_future_read_before_guaranteed_write(reg_id: int) -> bool:
+                for scan_index in range(end_index, len(instructions)):
+                    candidate = instructions[scan_index]
+                    if instruction_reads_register(candidate, reg_id):
+                        return True
+                    if candidate.op.name == "RETURN":
+                        read_index = next_register_read_index(scan_index + 1, reg_id)
+                        if read_index is not None and instruction_can_be_skipped_before_read(scan_index, read_index):
+                            continue
+                        return False
+                    if instruction_writes_register(candidate, reg_id):
+                        read_index = next_register_read_index(scan_index + 1, reg_id)
+                        if read_index is not None and instruction_can_be_skipped_before_read(scan_index, read_index):
+                            continue
+                        return False
+                return False
+
+            liveout_regs: list[int] = []
+            seen: set[int] = set()
+            for reg_id in range(proto.maxstacksize):
+                if not has_future_read_before_guaranteed_write(reg_id):
+                    continue
+                for start, end_pc in ranges:
+                    scan = start
+                    while scan < len(instructions):
+                        candidate = instructions[scan]
+                        if candidate.pc >= end_pc:
+                            break
+                        if instruction_writes_register(candidate, reg_id):
+                            if reg_id not in seen:
+                                liveout_regs.append(reg_id)
+                                seen.add(reg_id)
+                            break
+                        scan += 1
+                    if reg_id in seen:
+                        break
+
+            for reg_id in liveout_regs:
+                debug_name = _debug_local_name(proto, reg_id, instructions[end_index].pc)
+                local_name = debug_name or (reg(reg_id) if reg_id < proto.numparams else f"r{reg_id}")
+                if not _is_identifier(local_name):
+                    local_name = f"r{reg_id}"
+
+                key = local_key(reg_id, local_name, instructions[end_index].pc)
+                already_declared = reg_id < proto.numparams or key in declared_locals or local_name in inferred_locals
+                current = reg(reg_id)
+                if not already_declared:
+                    initial = "nil" if current == local_name else current
+                    emit_line(indent, f"local {local_name} = {initial}")
+                    if debug_name is not None:
+                        declared_locals.add(key)
+                    else:
+                        inferred_locals.add(local_name)
+                elif current != local_name and reg_id >= proto.numparams:
+                    emit_line(indent, f"{local_name} = {current}")
+
+                mutable_capture_locals[reg_id] = local_name
+                set_reg(reg_id, local_name)
+
         def terminating_range_end_pc(start_index: int, limit_pc: int | None) -> int | None:
             scan = start_index
             while scan < len(instructions):
@@ -2656,11 +2744,13 @@ def decompile_proto(
                     index = folded_index
                     continue
 
+                folded_state = snapshot_state()
                 folded_index = folded_short_circuit_if_index(insn)
                 if folded_index is not None:
                     open_results = None
                     index = folded_index
                     continue
+                restore_state(folded_state)
 
                 target = insn.jump_target
                 body_index = pc_to_index.get(insn.next_pc)
@@ -2867,6 +2957,7 @@ def decompile_proto(
                     if has_else:
                         ranges.append((else_index, end_pc))
                     materialize_table_writes(ranges, indent)
+                    materialize_branch_liveout_registers(ranges, pc_to_index.get(end_pc), indent)
 
                     saved_regs = dict(regs)
                     saved_tables = clone_tables()

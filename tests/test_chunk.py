@@ -3883,6 +3883,96 @@ def make_short_circuit_before_contained_if_chunk():
     return bytes(out)
 
 
+def make_short_circuit_branch_assignment_used_after_chunk():
+    strings = ["print", "idle"]
+    words = [
+        encode_abc("MOVE", 2, 0, 0),
+        encode_ad("JUMPXEQKNIL", 1, 4),
+        0,
+        encode_ad("JUMPXEQKB", 1, 2),
+        0x80000000,
+        encode_ad("LOADK", 2, 2),
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_abc("MOVE", 4, 2, 0),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_short_circuit_branch_assignment_before_conditional_overwrite_chunk():
+    strings = ["print", "idle", "fallback"]
+    words = [
+        encode_abc("MOVE", 3, 0, 0),
+        encode_ad("JUMPXEQKNIL", 1, 4),
+        0,
+        encode_ad("JUMPXEQKB", 1, 2),
+        0x80000000,
+        encode_ad("LOADK", 3, 2),
+        encode_ad("JUMPIFNOT", 2, 1),
+        encode_ad("LOADK", 3, 3),
+        encode_ad("GETIMPORT", 4, 1),
+        import_id(0),
+        encode_abc("MOVE", 5, 3, 0),
+        encode_abc("CALL", 4, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 3, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -7459,6 +7549,41 @@ class ChunkTests(unittest.TestCase):
         self.assertIn('print("body")', source)
         self.assertIn('print("after")', source)
         self.assertNotIn("JUMPIFNOT", source)
+
+    def test_decompile_short_circuit_branch_assignment_used_after(self):
+        chunk = parse_chunk(make_short_circuit_branch_assignment_used_after_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'local r2 = p0\n'
+            'if p1 ~= nil and p1 == false then\n'
+            '    r2 = "idle"\n'
+            'end\n'
+            "print(r2)",
+            source,
+        )
+        self.assertNotIn("\nif p1 ~= nil and p1 == false then\nend", source)
+        self.assertNotIn("JUMPXEQ", source)
+
+    def test_decompile_short_circuit_branch_assignment_before_conditional_overwrite(self):
+        chunk = parse_chunk(make_short_circuit_branch_assignment_before_conditional_overwrite_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'local r3 = p0\n'
+            'if p1 ~= nil and p1 == false then\n'
+            '    r3 = "idle"\n'
+            'end\n'
+            'if p2 then\n'
+            '    r3 = "fallback"\n'
+            'end\n'
+            "print(r3)",
+            source,
+        )
+        self.assertNotIn("\nif p1 ~= nil and p1 == false then\nend", source)
+        self.assertNotIn("JUMPXEQ", source)
 
     def test_decompile_constant_comparison_if_block(self):
         chunk = parse_chunk(make_constant_comparison_if_call_chunk())

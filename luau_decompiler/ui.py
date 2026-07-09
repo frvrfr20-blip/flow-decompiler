@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -46,6 +47,148 @@ class AutoScrollbar(tk.Scrollbar):
         elif self._pack_options:
             super().pack(**self._pack_options)
         super().set(first, last)
+
+
+class ToolTip:
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self.window: tk.Toplevel | None = None
+        self.after_id: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def _schedule(self, _event: tk.Event[tk.Widget]) -> None:
+        self.hide()
+        self.after_id = self.widget.after(450, self.show)
+
+    def show(self) -> None:
+        if self.window:
+            return
+        x = self.widget.winfo_rootx() + 8
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.window = tk.Toplevel(self.widget)
+        self.window.wm_overrideredirect(True)
+        self.window.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self.window,
+            text=self.text,
+            bg=UI_COLORS["panel_alt"],
+            fg=UI_COLORS["text"],
+            padx=8,
+            pady=4,
+            font=("Segoe UI", 8),
+            highlightbackground=UI_COLORS["line"],
+            highlightthickness=1,
+        ).pack()
+
+    def hide(self, _event: tk.Event[tk.Widget] | None = None) -> None:
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        if self.window:
+            self.window.destroy()
+            self.window = None
+
+
+class IconButton(tk.Canvas):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        icon: str,
+        command: Callable[[], None],
+        tooltip: str,
+        kind: str = "default",
+    ) -> None:
+        self.kind = kind
+        self.icon = icon
+        self.command = command
+        self.hovered = False
+        super().__init__(
+            parent,
+            width=38,
+            height=32,
+            bd=0,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=UI_COLORS["bg"],
+            cursor="hand2",
+            takefocus=1,
+        )
+        self._paint()
+        ToolTip(self, tooltip)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<Button-1>", self._click)
+        self.bind("<Return>", self._click)
+        self.bind("<space>", self._click)
+        self.bind("<FocusIn>", lambda _event: self.configure(highlightbackground=UI_COLORS["accent"]))
+        self.bind("<FocusOut>", lambda _event: self.configure(highlightbackground=UI_COLORS["bg"]))
+
+    def _colors(self) -> tuple[str, str]:
+        if self.kind == "accent":
+            return (UI_COLORS["accent_hover"] if self.hovered else UI_COLORS["accent"], "#ffffff")
+        return (UI_COLORS["control_hover"] if self.hovered else UI_COLORS["control"], UI_COLORS["text"])
+
+    def _paint(self) -> None:
+        bg, fg = self._colors()
+        self.configure(bg=bg)
+        self.delete("all")
+        self._draw_lucide(self.icon, fg)
+
+    def _enter(self, _event: tk.Event[tk.Widget]) -> None:
+        self.hovered = True
+        self._paint()
+
+    def _leave(self, _event: tk.Event[tk.Widget]) -> None:
+        self.hovered = False
+        self._paint()
+
+    def _click(self, _event: tk.Event[tk.Widget]) -> str:
+        self.command()
+        return "break"
+
+    def _xy(self, x: float, y: float) -> tuple[float, float]:
+        return 10 + x * 0.75, 7 + y * 0.75
+
+    def _line(self, points: list[tuple[float, float]], color: str) -> None:
+        coords: list[float] = []
+        for x, y in points:
+            coords.extend(self._xy(x, y))
+        self.create_line(*coords, fill=color, width=2, capstyle="round", joinstyle="round")
+
+    def _rect(self, x1: float, y1: float, x2: float, y2: float, color: str) -> None:
+        ax, ay = self._xy(x1, y1)
+        bx, by = self._xy(x2, y2)
+        self.create_rectangle(ax, ay, bx, by, outline=color, width=2)
+
+    def _poly(self, points: list[tuple[float, float]], color: str) -> None:
+        coords: list[float] = []
+        for x, y in points:
+            coords.extend(self._xy(x, y))
+        self.create_polygon(*coords, fill="", outline=color, width=2, joinstyle="round")
+
+    def _draw_lucide(self, icon: str, color: str) -> None:
+        if icon == "folder-open":
+            self._line([(3, 6), (8, 6), (10, 8), (21, 8), (21, 11)], color)
+            self._line([(3, 6), (3, 19), (18, 19), (22, 11), (7, 11), (3, 19)], color)
+        elif icon == "copy":
+            self._rect(8, 8, 20, 20, color)
+            self._line([(4, 16), (4, 4), (16, 4)], color)
+            self._line([(4, 4), (16, 4), (16, 6)], color)
+        elif icon == "save":
+            self._rect(5, 3, 19, 21, color)
+            self._line([(8, 3), (8, 9), (16, 9), (16, 3)], color)
+            self._line([(8, 21), (8, 15), (16, 15), (16, 21)], color)
+        elif icon == "play":
+            self._poly([(8, 5), (19, 12), (8, 19)], color)
+        elif icon == "trash-2":
+            self._line([(3, 6), (21, 6)], color)
+            self._line([(8, 6), (8, 4), (16, 4), (16, 6)], color)
+            self._line([(6, 6), (7, 21), (17, 21), (18, 6)], color)
+            self._line([(10, 10), (10, 17)], color)
+            self._line([(14, 10), (14, 17)], color)
 
 
 def _load_bytes(path: Path) -> bytes:
@@ -125,9 +268,9 @@ class FlowDecompilerApp:
         )
         path_chip.pack(side="left", fill="x", expand=True, padx=(12, 10))
 
-        self._button(header, "Open", self._open, "accent").pack(side="right")
-        self._button(header, "Save", self._save).pack(side="right", padx=(0, 8))
-        self._button(header, "Copy", self._copy).pack(side="right", padx=(0, 8))
+        self._icon_button(header, "folder-open", self._open, "Open", "accent").pack(side="right")
+        self._icon_button(header, "save", self._save, "Save").pack(side="right", padx=(0, 8))
+        self._icon_button(header, "copy", self._copy, "Copy").pack(side="right", padx=(0, 8))
 
         controls = tk.Frame(
             outer,
@@ -147,8 +290,8 @@ class FlowDecompilerApp:
             button.pack(side="left", padx=(0, 1))
             self.mode_buttons[mode] = button
 
-        self._button(controls, "Run", self._run, "accent").pack(side="right")
-        self._button(controls, "Clear", self._clear).pack(side="right", padx=(0, 8))
+        self._icon_button(controls, "play", self._run, "Run", "accent").pack(side="right")
+        self._icon_button(controls, "trash-2", self._clear, "Clear").pack(side="right", padx=(0, 8))
 
         body = tk.Frame(
             outer,
@@ -219,6 +362,16 @@ class FlowDecompilerApp:
             font=("Segoe UI", 9),
         ).pack(side="bottom", fill="x")
         self._refresh_mode_buttons()
+
+    def _icon_button(
+        self,
+        parent: tk.Misc,
+        icon: str,
+        command: Callable[[], None],
+        tooltip: str,
+        kind: str = "default",
+    ) -> IconButton:
+        return IconButton(parent, icon, command, tooltip, kind)
 
     def _button(self, parent: tk.Misc, text: str, command: object, kind: str = "default") -> tk.Button:
         if kind == "accent":

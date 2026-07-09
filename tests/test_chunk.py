@@ -4016,6 +4016,45 @@ def make_conditional_value_with_guarded_fallback_chunk():
     return bytes(out)
 
 
+def make_branch_table_literal_assignment_used_after_chunk():
+    strings = ["print"]
+    words = [
+        encode_abc("MOVE", 2, 0, 0),
+        encode_ad("JUMPIF", 2, 2),
+        encode_abc("NEWTABLE", 2, 0, 0),
+        0,
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_abc("MOVE", 4, 2, 0),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -7644,6 +7683,14 @@ class ChunkTests(unittest.TestCase):
         )
         self.assertNotIn("\nif p0 then\nend", source)
         self.assertNotIn("JUMPIF", source)
+
+    def test_decompile_branch_table_literal_assignment_used_after(self):
+        chunk = parse_chunk(make_branch_table_literal_assignment_used_after_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r2 = p0\nif not p0 then\n    r2 = {}\nend\nprint(r2)", source)
+        self.assertNotIn("\nif not p0 then\nend", source)
 
     def test_decompile_constant_comparison_if_block(self):
         chunk = parse_chunk(make_constant_comparison_if_call_chunk())

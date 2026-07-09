@@ -700,6 +700,18 @@ def decompile_proto(
 
     def set_table_reg(reg_id: int, table: TableLiteral, pc: int, indent: int) -> None:
         nonlocal open_results
+        mutable_name = mutable_capture_locals.get(reg_id)
+        if mutable_name is not None:
+            rendered = table.render()
+            if rendered != mutable_name:
+                emit_line(indent, f"{mutable_name} = {rendered}")
+            table.materialized = True
+            table_literals[reg_id] = table
+            regs[reg_id] = mutable_name
+            if open_results is not None and reg_id >= open_results[0]:
+                open_results = None
+            return
+
         table_literals[reg_id] = table
         local_name = _debug_local_name(proto, reg_id, pc)
         if local_name is not None and reg_id >= proto.numparams and local_key(reg_id, local_name, pc) not in declared_locals:

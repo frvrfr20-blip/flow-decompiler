@@ -1201,6 +1201,8 @@ def decompile_proto(
                         else_end_pc = terminating_range_end_pc(target_index, limit_pc)
                         if then_end_pc == target and else_end_pc is not None:
                             return else_end_pc
+                        scan = target_index
+                        continue
                 if candidate.op.name == "JUMP":
                     return None
                 scan += 1
@@ -2721,8 +2723,29 @@ def decompile_proto(
                         stop_pc is None
                         or target <= stop_pc
                         or target == branch_exit_pc
+                        or (
+                            stop_pc is not None
+                            and target > stop_pc
+                            and stop_pc in pc_to_index
+                            and target_index > pc_to_index[stop_pc]
+                            and (loop_continue_pc is None or target <= loop_continue_pc)
+                            and target != loop_exit_pc
+                        )
                     )
                 ):
+                    if stop_pc is not None and target > stop_pc and target != branch_exit_pc:
+                        saved_regs = dict(regs)
+                        saved_tables = clone_tables()
+                        open_results = None
+                        emit_line(indent, f"if {condition} then")
+                        emit_range(body_index, stop_pc, indent + 1, loop_continue_pc, loop_exit_pc, target)
+                        emit_line(indent, "end")
+                        regs = saved_regs
+                        table_literals = saved_tables
+                        open_results = None
+                        index = pc_to_index.get(stop_pc, target_index)
+                        continue
+
                     if stop_pc is not None and target == branch_exit_pc and target > stop_pc:
                         branch_exit_jump = instructions[pc_to_index[stop_pc] - 1] if stop_pc in pc_to_index and pc_to_index[stop_pc] > body_index else None
                         body_stop_pc = (

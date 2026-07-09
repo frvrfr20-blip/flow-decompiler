@@ -3769,6 +3769,71 @@ def make_contained_if_in_terminating_else_chunk():
     return bytes(out)
 
 
+def make_short_circuit_before_contained_if_chunk():
+    strings = ["print", "body", "after", "mode", "slot", "value", "guard", "looped", "idle"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_ad("JUMPXEQKNIL", 1, 4),
+        0,
+        encode_ad("JUMPXEQKB", 1, 2),
+        0x80000000,
+        encode_ad("LOADK", 2, 9),
+        encode_ad("JUMPIFNOT", 3, 7),
+        encode_ad("JUMPIFNOT", 4, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_ad("LOADK", 2, 9),
+        encode_ad("GETIMPORT", 5, 1),
+        import_id(0),
+        encode_ad("LOADK", 6, 2),
+        encode_abc("CALL", 5, 2, 1),
+        encode_ad("GETIMPORT", 5, 1),
+        import_id(0),
+        encode_ad("LOADK", 6, 3),
+        encode_abc("CALL", 5, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([7, 5, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(6)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out.append(1)
+    out.append(2)
+    out.append(3)
+    out += varint(9)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(5)
+    for name_id, reg_id in ((4, 0), (5, 1), (6, 2), (7, 3), (8, 4)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(20)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -3864,6 +3929,54 @@ def make_constant_comparison_or_if_call_chunk():
     out += varint(1)
     out += varint(10)
     out.append(0)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_constant_comparison_exits_bounded_branch_chunk():
+    strings = ["boolean", "number", "out", "value", "default"]
+    words = [
+        encode_ad("JUMPIFEQ", 0, 7),
+        1,
+        encode_ad("LOADK", 2, 1),
+        encode_ad("JUMPXEQKS", 2, 5),
+        0x80000000 | 1,
+        encode_ad("LOADK", 2, 2),
+        encode_ad("JUMPXEQKS", 2, 2),
+        1,
+        encode_ad("LOADK", 0, 1),
+        encode_abc("SETGLOBAL", 0, 0, 0),
+        3,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    for string_id in (1, 2, 3):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(2)
+    for name_id, reg_id in ((4, 0), (5, 1)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(12)
+        out.append(reg_id)
     out += varint(0)
     out += varint(0)
     return bytes(out)
@@ -7264,11 +7377,22 @@ class ChunkTests(unittest.TestCase):
         self.assertIn("if mode then", source)
         self.assertIn("if done then\n        return\n    end", source)
         self.assertIn('print("run")', source)
-        self.assertIn('else\n    print("else")\nend', source)
+        self.assertIn('print("else")', source)
         self.assertNotIn("JUMPIF", source)
 
     def test_decompile_contained_if_in_terminating_else(self):
         chunk = parse_chunk(make_contained_if_in_terminating_else_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if guard then", source)
+        self.assertIn("if looped then\n            return\n        end", source)
+        self.assertIn('print("body")', source)
+        self.assertIn('print("after")', source)
+        self.assertNotIn("JUMPIFNOT", source)
+
+    def test_decompile_short_circuit_before_contained_if_keeps_range_open(self):
+        chunk = parse_chunk(make_short_circuit_before_contained_if_chunk())
 
         source = decompile_chunk(chunk)
 
@@ -7295,6 +7419,13 @@ class ChunkTests(unittest.TestCase):
             'local status = "ready"\nif status == "ready" or status == "queued" then\n    print("ok")\nend',
             source,
         )
+        self.assertNotIn("JUMPXEQKS", source)
+
+    def test_decompile_constant_comparison_exits_bounded_branch(self):
+        chunk = parse_chunk(make_constant_comparison_exits_bounded_branch_chunk())
+
+        source = decompile_chunk(chunk)
+
         self.assertNotIn("JUMPXEQKS", source)
 
     def test_decompile_upvalue_setup_short_circuit_and_if(self):

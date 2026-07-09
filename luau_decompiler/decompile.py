@@ -158,6 +158,10 @@ def _is_identifier(value: str) -> bool:
     return (first == "_" or first.isalpha()) and all(ch == "_" or ch.isalnum() for ch in rest)
 
 
+def _is_if_expression(value: str) -> bool:
+    return value.startswith("if ")
+
+
 def _field_expr(receiver: str, key: str) -> str:
     receiver = _group_if_needed(receiver)
     if _is_identifier(key):
@@ -198,6 +202,8 @@ def _is_dotted_identifier_path(value: str) -> bool:
 def _call_target_expr(function: str) -> str:
     if function.startswith("(") and function.endswith(")"):
         return function
+    if _is_if_expression(function):
+        return f"({function})"
     if function.startswith("function("):
         return f"({function})"
     if function.startswith(("not ", "-", "#")):
@@ -236,9 +242,17 @@ def _namecall_expr(receiver: str, method: str, args: list[str]) -> str:
 def _group_if_needed(value: str) -> str:
     if value.startswith("(") and value.endswith(")"):
         return value
+    if _is_if_expression(value):
+        return f"({value})"
     if value.startswith(("not ", "-", "#")):
         return f"({value})"
     if any(token in value for token in _INFIX_TOKENS):
+        return f"({value})"
+    return value
+
+
+def _condition_expr(value: str) -> str:
+    if _is_if_expression(value):
         return f"({value})"
     return value
 
@@ -542,6 +556,7 @@ def decompile_proto(
     open_results: tuple[int, list[str]] | None = None
     declared_locals: set[tuple[int, str, int, int]] = set()
     inferred_locals: set[str] = set()
+    reserved_local_names: set[str] = set()
     encoded_header_written = False
 
     def reg(reg_id: int) -> str:
@@ -557,6 +572,8 @@ def decompile_proto(
 
     def emit_line(indent: int, value: str) -> None:
         prefix = "    " * indent
+        if value == "end" and lines and lines[-1] == f"{prefix}else":
+            lines.pop()
         for line in value.splitlines() or [""]:
             lines.append(f"{prefix}{line}")
 
@@ -862,7 +879,7 @@ def decompile_proto(
         if name == "JUMPIF":
             return _unary_expr("not", reg(insn.a))
         if name == "JUMPIFNOT":
-            return reg(insn.a)
+            return _condition_expr(reg(insn.a))
         if name in _REGISTER_COMPARE_FALLTHROUGH_OPS and insn.aux is not None:
             return _binary_expr(reg(insn.a), _REGISTER_COMPARE_FALLTHROUGH_OPS[name], reg(insn.aux & 0xFF))
         if name in _CONSTANT_COMPARE_OPS and insn.aux is not None:
@@ -880,7 +897,7 @@ def decompile_proto(
     def jump_taken_condition(insn) -> str | None:
         name = insn.op.name
         if name == "JUMPIF":
-            return reg(insn.a)
+            return _condition_expr(reg(insn.a))
         if name == "JUMPIFNOT":
             return _unary_expr("not", reg(insn.a))
         if name in _REGISTER_COMPARE_TAKEN_OPS and insn.aux is not None:
@@ -1027,8 +1044,12 @@ def decompile_proto(
                 }
                 open_results = None
                 if not emit_elseif_chain(nested_else_index, end_pc):
+                    else_line_index = len(lines)
                     emit_line(indent, "else")
+                    else_body_index = len(lines)
                     emit_range(nested_else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+                    if len(lines) == else_body_index:
+                        del lines[else_line_index:]
             regs = chain_regs
             table_literals = chain_tables
             open_results = None
@@ -1449,9 +1470,22 @@ def decompile_proto(
                     return f"{base_name}Result"
             return None
 
+        def unique_inferred_local_name(local_name: str) -> str:
+            used_names = set(inferred_locals)
+            used_names.update(reserved_local_names)
+            used_names.update(name for _, name, _, _ in declared_locals)
+            if local_name not in used_names:
+                return local_name
+
+            suffix = 2
+            while f"{local_name}_{suffix}" in used_names:
+                suffix += 1
+            return f"{local_name}_{suffix}"
+
         def declare_inferred_local(reg_id: int, local_name: str | None, value: str, indent: int) -> bool:
             if local_name is None or not _is_identifier(local_name):
                 return False
+            local_name = unique_inferred_local_name(local_name)
             if local_name not in inferred_locals:
                 emit_line(indent, f"local {local_name} = {value}")
                 inferred_locals.add(local_name)
@@ -2771,8 +2805,12 @@ def decompile_proto(
                         restore_state(branch_saved)
                         open_results = None
                         if not emit_elseif_chain(or_else_index, or_final_end_pc):
+                            else_line_index = len(lines)
                             emit_line(indent, "else")
+                            else_body_index = len(lines)
                             emit_range(or_else_index, or_final_end_pc, indent + 1, loop_continue_pc, loop_exit_pc, or_final_end_pc)
+                            if len(lines) == else_body_index:
+                                del lines[else_line_index:]
                     emit_line(indent, "end")
                     restore_state(branch_saved)
                     restore_state(saved)
@@ -2872,8 +2910,12 @@ def decompile_proto(
                         restore_state(branch_saved)
                         open_results = None
                         if not emit_elseif_chain(else_index, end_pc):
+                            else_line_index = len(lines)
                             emit_line(indent, "else")
+                            else_body_index = len(lines)
                             emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
+                            if len(lines) == else_body_index:
+                                del lines[else_line_index:]
                     emit_line(indent, "end")
                     restore_state(branch_saved)
                     restore_state(saved)
@@ -2965,15 +3007,20 @@ def decompile_proto(
                         materialize_branch_liveout_registers([(body_index, maybe_loop.pc)], loop_end_index, indent)
                         saved_regs = dict(regs)
                         saved_tables = clone_tables()
+                        saved_reserved_names = set(reserved_local_names)
                         open_results = None
                         for offset, loop_var in enumerate(loop_vars):
                             regs[insn.a + 3 + offset] = loop_var
                             table_literals.pop(insn.a + 3 + offset, None)
+                            if _is_identifier(loop_var):
+                                reserved_local_names.add(loop_var)
                         emit_line(indent, f"for {', '.join(loop_vars)} in {', '.join(iterator_values)} do")
                         emit_range(body_index, maybe_loop.pc, indent + 1, maybe_loop.pc, maybe_loop.next_pc)
                         emit_line(indent, "end")
                         regs = saved_regs
                         table_literals = saved_tables
+                        reserved_local_names.clear()
+                        reserved_local_names.update(saved_reserved_names)
                         open_results = None
                         index = loop_index + 1
                         continue
@@ -3006,14 +3053,19 @@ def decompile_proto(
                         materialize_branch_liveout_registers([(body_index, maybe_loop.pc)], loop_end_index, indent)
                         saved_regs = dict(regs)
                         saved_tables = clone_tables()
+                        saved_reserved_names = set(reserved_local_names)
                         open_results = None
                         regs[insn.a + 3] = loop_var
                         table_literals.pop(insn.a + 3, None)
+                        if _is_identifier(loop_var):
+                            reserved_local_names.add(loop_var)
                         emit_line(indent, f"for {loop_var} = {start_value}, {limit_value}, {step_value} do")
                         emit_range(body_index, maybe_loop.pc, indent + 1, maybe_loop.pc, target)
                         emit_line(indent, "end")
                         regs = saved_regs
                         table_literals = saved_tables
+                        reserved_local_names.clear()
+                        reserved_local_names.update(saved_reserved_names)
                         open_results = None
                         index = target_index
                         continue
@@ -3679,7 +3731,7 @@ def decompile_proto(
                             if declare_inferred_local(insn.a, inferred_name, call, indent):
                                 pass
                             elif future_register_read_count(index + 1, insn.a) > 1:
-                                local_name = f"r{insn.a}"
+                                local_name = unique_inferred_local_name(f"r{insn.a}")
                                 key = local_key(insn.a, local_name, insn.next_pc)
                                 if key not in declared_locals:
                                     emit_line(indent, f"local {local_name} = {call}")

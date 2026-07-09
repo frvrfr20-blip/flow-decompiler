@@ -3,7 +3,7 @@ import unittest
 import base64
 
 from luau_decompiler.chunk import parse_chunk
-from luau_decompiler.decompile import TableLiteral, decompile_chunk
+from luau_decompiler.decompile import TableLiteral, _binary_expr, _call_expr, _namecall_expr, decompile_chunk
 from luau_decompiler.disasm import encode_abc, encode_ad, encode_e
 
 
@@ -2711,6 +2711,92 @@ def make_if_expression_local_chunk():
     out += varint(9)
     out.append(1)
     out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_if_expression_condition_chunk():
+    strings = ["print", "yes", "no"]
+    words = [
+        encode_abc("LOADB", 0, 1, 0),
+        encode_ad("JUMPIFNOT", 0, 2),
+        encode_ad("LOADK", 1, 1),
+        encode_ad("JUMP", 0, 1),
+        encode_ad("LOADK", 1, 2),
+        encode_ad("JUMPIFNOT", 1, 4),
+        encode_ad("GETIMPORT", 2, 3),
+        import_id(0),
+        encode_abc("MOVE", 3, 1, 0),
+        encode_abc("CALL", 2, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_empty_else_branch_chunk():
+    strings = ["print", "hit"]
+    words = [
+        encode_abc("LOADB", 0, 1, 0),
+        encode_ad("JUMPIFNOT", 0, 5),
+        encode_ad("GETIMPORT", 1, 2),
+        import_id(0),
+        encode_ad("LOADK", 2, 1),
+        encode_abc("CALL", 1, 2, 1),
+        encode_ad("JUMP", 0, 1),
+        encode_abc("NOP", 0, 0, 0),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
     out += varint(0)
     return bytes(out)
 
@@ -5434,6 +5520,54 @@ def make_numeric_for_named_call_chunk():
     return bytes(out)
 
 
+def make_numeric_for_inferred_local_shadow_chunk():
+    strings = ["make", "print"]
+    words = [
+        encode_ad("LOADN", 0, 2),
+        encode_ad("LOADN", 1, 1),
+        encode_ad("LOADN", 2, 1),
+        encode_ad("FORNPREP", 0, 9),
+        encode_ad("GETIMPORT", 3, 2),
+        import_id(0),
+        encode_abc("CALL", 3, 1, 2),
+        encode_ad("GETIMPORT", 4, 3),
+        import_id(1),
+        encode_abc("MOVE", 5, 3, 0),
+        encode_abc("MOVE", 6, 3, 0),
+        encode_abc("CALL", 4, 3, 1),
+        encode_ad("FORNLOOP", 0, -9),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([7, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(4)
+    out += struct.pack("<I", import_id(1))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_generic_for_named_call_chunk():
     strings = ["next", "items", "print", "key", "value", "state"]
     words = [
@@ -7752,6 +7886,27 @@ class ChunkTests(unittest.TestCase):
         self.assertNotIn("if true then\n", source)
         self.assertNotIn("JUMPIFNOT", source)
 
+    def test_decompile_if_expression_condition_is_parenthesized(self):
+        chunk = parse_chunk(make_if_expression_condition_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'if (if true then "yes" else "no") then\n'
+            '    print(if true then "yes" else "no")\n'
+            "end",
+            source,
+        )
+        self.assertNotIn('if if true then "yes" else "no" then', source)
+
+    def test_decompile_skips_empty_else_branch(self):
+        chunk = parse_chunk(make_empty_else_branch_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn('if true then\n    print("hit")\nend', source)
+        self.assertNotIn("else\nend", source)
+
     def test_decompile_comparison_if_expression_local_assignment(self):
         chunk = parse_chunk(make_comparison_if_expression_local_chunk())
 
@@ -7788,6 +7943,18 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(source.splitlines()[-1], "return if true then 10 else 20")
         self.assertNotIn("if true then\n", source)
         self.assertNotIn("JUMPIFNOT", source)
+
+    def test_if_expression_is_grouped_when_nested_inside_other_expressions(self):
+        receiver = 'if Humanoid then Humanoid:FindFirstChildOfClass("Animator") else nil'
+        speed = "if captured8 then captured14(r4, p2) else p2.Magnitude"
+        callback = "if ready then handler else fallback"
+
+        self.assertEqual(
+            _namecall_expr(receiver, "GetPlayingAnimationTracks", []),
+            '(if Humanoid then Humanoid:FindFirstChildOfClass("Animator") else nil):GetPlayingAnimationTracks()',
+        )
+        self.assertEqual(_binary_expr("0.1", "<", speed), "0.1 < (if captured8 then captured14(r4, p2) else p2.Magnitude)")
+        self.assertEqual(_call_expr(callback, []), "(if ready then handler else fallback)()")
 
     def test_decompile_elseif_chain(self):
         chunk = parse_chunk(make_elseif_chain_chunk())
@@ -8337,6 +8504,20 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("for i = 1, 3, 1 do\n    print(i)\nend", source)
         self.assertNotIn("for r3", source)
+
+    def test_decompile_numeric_for_inferred_local_does_not_shadow_loop_var(self):
+        chunk = parse_chunk(make_numeric_for_inferred_local_shadow_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "for r3 = 1, 2, 1 do\n"
+            "    local r3_2 = make()\n"
+            "    print(r3_2, r3_2)\n"
+            "end",
+            source,
+        )
+        self.assertNotIn("for r3 = 1, 2, 1 do\n    local r3 = make()", source)
 
     def test_decompile_generic_for_uses_debug_local_names(self):
         chunk = parse_chunk(make_generic_for_named_call_chunk())

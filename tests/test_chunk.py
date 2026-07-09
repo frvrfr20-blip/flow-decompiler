@@ -1466,6 +1466,39 @@ def make_numeric_loop_mutated_table_without_debug_locals_chunk():
     return bytes(out)
 
 
+def make_numeric_loop_scalar_liveout_chunk():
+    words = [
+        encode_abc("LOADB", 0, 0, 0),
+        encode_ad("LOADN", 1, 3),
+        encode_ad("LOADN", 2, 1),
+        encode_ad("LOADN", 3, 1),
+        encode_ad("FORNPREP", 1, 2),
+        encode_abc("LOADB", 0, 1, 0),
+        encode_ad("FORNLOOP", 1, -2),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_generic_for_pairs_pending_table_literal_chunk():
     strings = ["a", "b", "c", "pairs", "print", "t", "k", "v"]
     words = [
@@ -7374,6 +7407,21 @@ class ChunkTests(unittest.TestCase):
             source,
         )
         self.assertNotIn("return {}", source)
+
+    def test_decompile_loop_scalar_liveout_materializes_before_loop(self):
+        chunk = parse_chunk(make_numeric_loop_scalar_liveout_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local r0 = false\n"
+            "for r4 = 1, 3, 1 do\n"
+            "    r0 = true\n"
+            "end\n"
+            "return r0",
+            source,
+        )
+        self.assertNotIn("return true", source)
 
     def test_decompile_infers_require_module_local_from_terminal_path(self):
         chunk = parse_chunk(make_inferred_require_module_local_chunk())

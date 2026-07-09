@@ -1489,6 +1489,39 @@ def decompile_proto(
                 if instruction_writes_register(instructions[scan_index], reg_id)
             )
 
+        def previous_single_result_call_source(condition_index: int, reg_id: int) -> str | None:
+            call_index = condition_index - 1
+            if call_index < 0:
+                return None
+            call_insn = instructions[call_index]
+            if call_insn.op.name not in {"CALL", "CALLFB"} or call_insn.a != reg_id or call_insn.c != 2:
+                return None
+
+            namecall_index = call_index - 1
+            if namecall_index >= 0:
+                maybe_namecall = instructions[namecall_index]
+                if (
+                    maybe_namecall.op.name in {"NAMECALL", "NAMECALLUDATA"}
+                    and maybe_namecall.a == call_insn.a
+                    and maybe_namecall.aux is not None
+                ):
+                    key_index = _aux_key_index(maybe_namecall.op.name, maybe_namecall.aux)
+                    method = proto.constant_text(key_index) or f"K{key_index}"
+                    args = fixed_args(call_insn.a + 2, max(call_insn.b - 2, 0))
+                    return _namecall_expr(reg(maybe_namecall.b), method, args)
+
+            args = fixed_args(call_insn.a + 1, max(call_insn.b - 1, 0))
+            return _call_expr(reg(call_insn.a), args)
+
+        def recover_constant_condition_from_previous_call(condition_index: int, candidate) -> str | None:
+            name = candidate.op.name
+            if name not in {"JUMPIF", "JUMPIFNOT"}:
+                return None
+            call_source = previous_single_result_call_source(condition_index, candidate.a)
+            if call_source is None:
+                return None
+            return _unary_expr("not", call_source) if name == "JUMPIF" else call_source
+
         def is_generic_for_nil_state_setup(instruction_index: int) -> bool:
             candidate = instructions[instruction_index]
             if candidate.op.name != "LOADNIL":
@@ -2869,7 +2902,9 @@ def decompile_proto(
                         else:
                             iterator_values = _trim_trailing_nil([reg(insn.a), reg(insn.a + 1), reg(insn.a + 2)])
 
+                        loop_end_index = pc_to_index.get(maybe_loop.next_pc)
                         materialize_table_writes([(body_index, maybe_loop.pc)], indent)
+                        materialize_branch_liveout_registers([(body_index, maybe_loop.pc)], loop_end_index, indent)
                         saved_regs = dict(regs)
                         saved_tables = clone_tables()
                         open_results = None
@@ -2908,7 +2943,9 @@ def decompile_proto(
                         limit_value = reg(insn.a)
                         step_value = reg(insn.a + 1)
 
+                        loop_end_index = pc_to_index.get(maybe_loop.next_pc)
                         materialize_table_writes([(body_index, maybe_loop.pc)], indent)
+                        materialize_branch_liveout_registers([(body_index, maybe_loop.pc)], loop_end_index, indent)
                         saved_regs = dict(regs)
                         saved_tables = clone_tables()
                         open_results = None
@@ -3120,6 +3157,8 @@ def decompile_proto(
                     continue
 
                 condition = jump_fallthrough_condition(insn)
+                if condition in {"true", "false", "not true", "not false"}:
+                    condition = recover_constant_condition_from_previous_call(index, insn) or condition
                 if (
                     condition is not None
                     and target is not None

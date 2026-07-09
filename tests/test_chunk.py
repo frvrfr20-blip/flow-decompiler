@@ -3383,6 +3383,138 @@ def make_constant_comparison_or_if_call_chunk():
     return bytes(out)
 
 
+def make_upvalue_setup_short_circuit_and_if_chunk():
+    strings = ["print", "hit", "FreeFall"]
+    words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_ad("JUMPXEQKS", 0, 9),
+        0x80000000 | 3,
+        encode_abc("GETUPVAL", 1, 1, 0),
+        encode_ad("LOADN", 2, 0),
+        encode_ad("JUMPIFNOTLE", 1, 5),
+        2,
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_ad("LOADK", 4, 2),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 0, 2, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_upvalue_setup_short_circuit_and_elseif_chunk():
+    strings = ["print", "fall", "FreeFall", "sit", "Seated"]
+    words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_ad("JUMPXEQKS", 0, 10),
+        0x80000000 | 3,
+        encode_abc("GETUPVAL", 1, 1, 0),
+        encode_ad("LOADN", 2, 0),
+        encode_ad("JUMPIFNOTLE", 1, 6),
+        2,
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_ad("LOADK", 4, 2),
+        encode_abc("CALL", 3, 2, 1),
+        encode_ad("JUMP", 0, 7),
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_ad("JUMPXEQKS", 0, 5),
+        0x80000000 | 5,
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_ad("LOADK", 4, 4),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 0, 2, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(6)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    for string_id in (2, 3, 4, 5):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_register_compare_preserves_condition_setup_chunk():
+    words = [
+        encode_abc("GETUPVAL", 5, 0, 0),
+        encode_ad("LOADN", 6, 0),
+        encode_ad("JUMPIFNOTLT", 6, 4),
+        5,
+        encode_abc("GETUPVAL", 6, 0, 0),
+        encode_abc("SUB", 5, 6, 0),
+        encode_abc("SETUPVAL", 5, 0, 0),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([7, 1, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_comparison_boolean_value_chunk():
     strings = ["print", "flag"]
     words = [
@@ -6541,6 +6673,40 @@ class ChunkTests(unittest.TestCase):
             source,
         )
         self.assertNotIn("JUMPXEQKS", source)
+
+    def test_decompile_upvalue_setup_short_circuit_and_if(self):
+        chunk = parse_chunk(make_upvalue_setup_short_circuit_and_if_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'if upvalue0 == "FreeFall" and upvalue1 <= 0 then\n    print("hit")\nend',
+            source,
+        )
+        self.assertNotIn("JUMPIFNOTLE", source)
+
+    def test_decompile_upvalue_setup_short_circuit_and_elseif(self):
+        chunk = parse_chunk(make_upvalue_setup_short_circuit_and_elseif_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'if upvalue0 == "FreeFall" and upvalue1 <= 0 then\n'
+            '    print("fall")\n'
+            'elseif upvalue0 == "Seated" then\n'
+            '    print("sit")\n'
+            "end",
+            source,
+        )
+        self.assertNotIn("JUMP R0", source)
+
+    def test_register_compare_keeps_original_condition_registers(self):
+        chunk = parse_chunk(make_register_compare_preserves_condition_setup_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if 0 < upvalue0 then", source)
+        self.assertNotIn("if upvalue0 < upvalue0 then", source)
 
     def test_decompile_comparison_boolean_value(self):
         chunk = parse_chunk(make_comparison_boolean_value_chunk())

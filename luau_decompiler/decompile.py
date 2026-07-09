@@ -875,13 +875,13 @@ def decompile_proto(
             chain_regs = dict(regs)
             chain_tables = clone_tables()
             condition_index = else_index
-            setup = instructions[condition_index]
-            if setup.op.name == "LOADB":
-                next_index = pc_to_index.get(setup.next_pc)
-                if next_index is None or instructions[next_index].op.name not in _CONDITIONAL_JUMP_OPS:
-                    return False
-                set_reg(setup.a, "true" if setup.b else "false")
-                condition_index = next_index
+            setup_index = apply_condition_setup(condition_index, end_pc)
+            if setup_index is None or setup_index >= len(instructions):
+                regs = chain_regs
+                table_literals = chain_tables
+                open_results = None
+                return False
+            condition_index = setup_index
 
             nested = instructions[condition_index]
             if nested.op.name not in _CONDITIONAL_JUMP_OPS:
@@ -1019,6 +1019,8 @@ def decompile_proto(
                 elif setup.op.name == "MOVE":
                     if not alias_table_reg(setup.a, setup.b, setup.next_pc):
                         set_reg(setup.a, reg(setup.b))
+                elif setup.op.name == "GETUPVAL":
+                    set_reg(setup.a, _upvalue_name(proto, setup.b, upvalue_names))
                 else:
                     return index
                 index += 1
@@ -1081,6 +1083,8 @@ def decompile_proto(
                     temp_regs[candidate.a] = "true" if candidate.b else "false"
                 elif name == "MOVE":
                     temp_regs[candidate.a] = temp_reg(candidate.b)
+                elif name == "GETUPVAL":
+                    temp_regs[candidate.a] = _upvalue_name(proto, candidate.b, upvalue_names)
                 elif name in {"GETTABLEKS", "GETUDATAKS"} and candidate.aux is not None:
                     key_index = _aux_key_index(name, candidate.aux)
                     key = proto.constant_text(key_index) or f"K{key_index}"
@@ -2056,6 +2060,9 @@ def decompile_proto(
         def folded_short_circuit_if_index(insn) -> int | None:
             nonlocal open_results, regs, table_literals
 
+            if insn.op.name in _REGISTER_COMPARE_FALLTHROUGH_OPS:
+                return None
+
             saved = snapshot_state()
 
             def parse_or_condition_chain(
@@ -2290,12 +2297,29 @@ def decompile_proto(
                     branch_saved = snapshot_state()
                     end_pc = target
                     end_index = target_index
+                    branch_stop_pc = target
                     else_index = None
+                    maybe_then_jump = instructions[target_index - 1]
+                    maybe_then_end_pc = maybe_then_jump.jump_target
+                    maybe_then_end_index = pc_to_index.get(maybe_then_end_pc) if maybe_then_end_pc is not None else None
+                    if (
+                        maybe_then_jump.op.name == "JUMP"
+                        and maybe_then_end_pc is not None
+                        and maybe_then_end_index is not None
+                        and maybe_then_end_pc > target
+                        and (stop_pc is None or maybe_then_end_pc <= stop_pc)
+                    ):
+                        branch_stop_pc = maybe_then_jump.pc
+                        else_index = target_index
+                        end_pc = maybe_then_end_pc
+                        end_index = maybe_then_end_index
                     maybe_else_jump = instructions[target_index]
                     maybe_end_pc = maybe_else_jump.jump_target
                     maybe_else_index = pc_to_index.get(maybe_else_jump.next_pc)
                     maybe_end_index = pc_to_index.get(maybe_end_pc) if maybe_end_pc is not None else None
                     if (
+                        else_index is None
+                        and
                         maybe_else_jump.op.name == "JUMP"
                         and maybe_end_pc is not None
                         and maybe_end_index is not None
@@ -2309,12 +2333,13 @@ def decompile_proto(
 
                     open_results = None
                     emit_line(indent, f"if {condition_chain_source(conditions, 'and')} then")
-                    emit_range(current_index, target, indent + 1, loop_continue_pc, loop_exit_pc)
+                    emit_range(current_index, branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc)
                     if else_index is not None:
                         restore_state(branch_saved)
                         open_results = None
-                        emit_line(indent, "else")
-                        emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+                        if not emit_elseif_chain(else_index, end_pc):
+                            emit_line(indent, "else")
+                            emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc)
                     emit_line(indent, "end")
                     restore_state(branch_saved)
                     restore_state(saved)

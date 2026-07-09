@@ -61,17 +61,6 @@ flow-decompiler target.bytecode.b64
 
 Unsupported instructions are left as comments instead of being hidden.
 
-## Compare With Fission
-
-If a local Fission server is running at `http://127.0.0.1:31337/luau/decompile`:
-
-```powershell
-python tools\compare_fission.py sample_namecall.b64 work_sample.b64 --keep-going
-python tools\compare_fission.py work_sample.b64 --json
-```
-
-The comparison reports local output, Fission output, line counts, evidence comments, unsupported comments, exact matches, and body-exact matches.
-
 ## Tests
 
 ```powershell

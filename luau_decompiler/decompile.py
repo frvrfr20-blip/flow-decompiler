@@ -3154,7 +3154,18 @@ def decompile_proto(
                             set_reg(insn.a, service_name)
                         elif debug_name is None and future_register_read_count(index + 1, insn.a) > 0:
                             inferred_name = inferred_namecall_local_name(receiver, method, args)
-                            if not declare_inferred_local(insn.a, inferred_name, call, indent):
+                            if declare_inferred_local(insn.a, inferred_name, call, indent):
+                                pass
+                            elif future_register_read_count(index + 1, insn.a) > 1:
+                                local_name = f"r{insn.a}"
+                                key = local_key(insn.a, local_name, insn.next_pc)
+                                if key not in declared_locals:
+                                    emit_line(indent, f"local {local_name} = {call}")
+                                    declared_locals.add(key)
+                                elif call != local_name:
+                                    emit_line(indent, f"{local_name} = {call}")
+                                set_reg(insn.a, local_name)
+                            else:
                                 set_reg_or_declare_local(insn.a, call, insn.next_pc, indent)
                         else:
                             set_reg_or_declare_local(insn.a, call, insn.next_pc, indent)

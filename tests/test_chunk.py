@@ -3559,6 +3559,55 @@ def make_and_call_guard_exits_parent_branch_chunk():
     return bytes(out)
 
 
+def make_namecall_guard_reuses_result_chunk():
+    strings = ["print", "FindFirstChild", "target", "name"]
+    words = [
+        encode_abc("MOVE", 4, 1, 0),
+        encode_abc("NAMECALL", 2, 0, 0),
+        2,
+        encode_abc("CALL", 2, 3, 2),
+        encode_ad("JUMPIFNOT", 2, 4),
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_abc("MOVE", 4, 2, 0),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out.append(3)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(2)
+    for name_id, reg_id in ((3, 0), (4, 1)):
+        out += varint(name_id)
+        out += varint(0)
+        out += varint(10)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_loop_exit_guard_chunk():
     strings = ["print", "body", "keep"]
     words = [
@@ -7350,6 +7399,15 @@ class ChunkTests(unittest.TestCase):
         self.assertIn('else\n    print("else")\nend', source)
         self.assertNotIn("JUMPIFNOT", source)
         self.assertNotIn("JUMP R0", source)
+
+    def test_decompile_namecall_guard_reuses_result_local(self):
+        chunk = parse_chunk(make_namecall_guard_reuses_result_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r2 = target:FindFirstChild(name)", source)
+        self.assertIn("if r2 then\n    print(r2)\nend", source)
+        self.assertNotIn("print(target:FindFirstChild(name))", source)
 
     def test_decompile_loop_exit_guard_as_break(self):
         chunk = parse_chunk(make_loop_exit_guard_chunk())

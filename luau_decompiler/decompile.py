@@ -1404,6 +1404,8 @@ def decompile_proto(
                 return candidate.a == reg_id or candidate.b == reg_id or candidate.c == reg_id
             if name == "SETLIST" and candidate.c:
                 return candidate.b <= reg_id < candidate.b + max(candidate.c - 1, 0)
+            if name == "CAPTURE" and candidate.a in {0, 1}:
+                return candidate.b == reg_id
             if name in _BINARY_OPS:
                 return candidate.b == reg_id or candidate.c == reg_id
             if name in _BINARY_K_OPS:

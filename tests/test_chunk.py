@@ -4055,6 +4055,62 @@ def make_branch_table_literal_assignment_used_after_chunk():
     return bytes(out)
 
 
+def make_branch_assignment_captured_by_closure_chunk():
+    strings = ["outer"]
+    main_words = [
+        encode_abc("LOADNIL", 2, 0, 0),
+        encode_ad("JUMPIFNOT", 0, 1),
+        encode_ad("LOADK", 2, 0),
+        encode_ad("NEWCLOSURE", 1, 0),
+        encode_abc("CAPTURE", 0, 2, 0),
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+    child_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([3, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += bytes([1, 0, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
+
+    out += varint(0)
+    return bytes(out)
+
+
 def make_constant_comparison_if_call_chunk():
     strings = ["print", "ready", "ok", "status"]
     words = [
@@ -7691,6 +7747,14 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("local r2 = p0\nif not p0 then\n    r2 = {}\nend\nprint(r2)", source)
         self.assertNotIn("\nif not p0 then\nend", source)
+
+    def test_decompile_branch_assignment_captured_by_closure(self):
+        chunk = parse_chunk(make_branch_assignment_captured_by_closure_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn('if p0 then\n    r2 = "outer"\nend', source)
+        self.assertNotIn("\nif p0 then\nend", source)
 
     def test_decompile_constant_comparison_if_block(self):
         chunk = parse_chunk(make_constant_comparison_if_call_chunk())

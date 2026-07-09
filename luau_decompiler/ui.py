@@ -15,6 +15,38 @@ from .decompile import decompile_chunk
 
 MODES = ("decompile", "disasm", "summary")
 
+UI_COLORS = {
+    "bg": "#111214",
+    "panel": "#16181c",
+    "panel_alt": "#1b1f25",
+    "line": "#2a2e36",
+    "output": "#0d0f12",
+    "control": "#20242b",
+    "control_hover": "#2a3038",
+    "active": "#263149",
+    "text": "#e7e9ee",
+    "muted": "#8f98a6",
+    "accent": "#6f8fdb",
+    "accent_hover": "#7a9bea",
+}
+
+
+class AutoScrollbar(tk.Scrollbar):
+    def __init__(self, master: tk.Misc, **kwargs: object) -> None:
+        super().__init__(master, **kwargs)
+        self._pack_options: dict[str, object] | None = None
+
+    def pack(self, **kwargs: object) -> None:  # type: ignore[override]
+        self._pack_options = kwargs
+        super().pack(**kwargs)
+
+    def set(self, first: str, last: str) -> None:
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self.pack_forget()
+        elif self._pack_options:
+            super().pack(**self._pack_options)
+        super().set(first, last)
+
 
 def _load_bytes(path: Path) -> bytes:
     data = path.read_bytes()
@@ -47,6 +79,7 @@ class FlowDecompilerApp:
         self.proto = tk.StringVar(value="auto")
         self.status = tk.StringVar(value="Ready")
         self.file_label = tk.StringVar(value=self.path.name if self.path else "No file selected")
+        self.mode_buttons: dict[str, tk.Button] = {}
 
         self._configure_root()
         self._build()
@@ -55,90 +88,211 @@ class FlowDecompilerApp:
 
     def _configure_root(self) -> None:
         self.root.title("Flow Decompiler")
-        self.root.geometry("980x680")
-        self.root.minsize(820, 560)
-        self.root.configure(bg="#0f141b")
+        self.root.geometry("940x620")
+        self.root.minsize(760, 500)
+        self.root.configure(bg=UI_COLORS["bg"])
 
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure(".", font=("Segoe UI", 10), background="#0f141b", foreground="#e8edf2")
-        style.configure("Frame.TFrame", background="#0f141b")
-        style.configure("Panel.TFrame", background="#151c24")
-        style.configure("Title.TLabel", background="#0f141b", foreground="#f4f7fb", font=("Segoe UI", 18, "bold"))
-        style.configure("Subtle.TLabel", background="#0f141b", foreground="#8f9baa")
-        style.configure("Status.TLabel", background="#0b1016", foreground="#8f9baa", padding=(12, 7))
-        style.configure("TButton", background="#202a35", foreground="#f4f7fb", borderwidth=0, padding=(13, 8))
-        style.map("TButton", background=[("active", "#2c3948"), ("pressed", "#1a222c")])
-        style.configure("Accent.TButton", background="#2a7f62", foreground="#ffffff")
-        style.map("Accent.TButton", background=[("active", "#319273"), ("pressed", "#236d54")])
-        style.configure("Mode.TButton", background="#1a222c", foreground="#cbd5e1", padding=(12, 7))
-        style.map("Mode.TButton", background=[("active", "#263240"), ("pressed", "#263240")])
-        style.configure("TEntry", fieldbackground="#0f141b", foreground="#e8edf2", bordercolor="#2c3948")
+        style.configure(".", font=("Segoe UI", 9), background=UI_COLORS["bg"], foreground=UI_COLORS["text"])
 
     def _build(self) -> None:
-        outer = ttk.Frame(self.root, style="Frame.TFrame", padding=18)
+        outer = tk.Frame(self.root, bg=UI_COLORS["bg"], padx=14, pady=12)
         outer.pack(fill="both", expand=True)
 
-        header = ttk.Frame(outer, style="Frame.TFrame")
+        header = tk.Frame(outer, bg=UI_COLORS["bg"])
         header.pack(fill="x")
 
-        title_block = ttk.Frame(header, style="Frame.TFrame")
-        title_block.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_block, text="Flow Decompiler", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(title_block, textvariable=self.file_label, style="Subtle.TLabel").pack(anchor="w", pady=(4, 0))
+        tk.Label(
+            header,
+            text="Flow",
+            bg=UI_COLORS["bg"],
+            fg=UI_COLORS["text"],
+            font=("Segoe UI Semibold", 11),
+        ).pack(side="left")
 
-        ttk.Button(header, text="Open", style="Accent.TButton", command=self._open).pack(side="right", padx=(8, 0))
-        ttk.Button(header, text="Save", command=self._save).pack(side="right", padx=(8, 0))
-        ttk.Button(header, text="Copy", command=self._copy).pack(side="right", padx=(8, 0))
+        path_chip = tk.Label(
+            header,
+            textvariable=self.file_label,
+            anchor="w",
+            bg=UI_COLORS["panel"],
+            fg=UI_COLORS["muted"],
+            padx=10,
+            pady=6,
+            font=("Segoe UI", 9),
+            highlightbackground=UI_COLORS["line"],
+            highlightcolor=UI_COLORS["line"],
+            highlightthickness=1,
+        )
+        path_chip.pack(side="left", fill="x", expand=True, padx=(12, 10))
 
-        controls = ttk.Frame(outer, style="Panel.TFrame", padding=(12, 10))
-        controls.pack(fill="x", pady=(16, 12))
+        self._button(header, "Open", self._open, "accent").pack(side="right")
+        self._button(header, "Save", self._save).pack(side="right", padx=(0, 8))
+        self._button(header, "Copy", self._copy).pack(side="right", padx=(0, 8))
 
+        controls = tk.Frame(
+            outer,
+            bg=UI_COLORS["panel"],
+            padx=8,
+            pady=8,
+            highlightbackground=UI_COLORS["line"],
+            highlightcolor=UI_COLORS["line"],
+            highlightthickness=1,
+        )
+        controls.pack(fill="x", pady=(12, 10))
+
+        mode_bar = tk.Frame(controls, bg=UI_COLORS["panel"], padx=1, pady=1)
+        mode_bar.pack(side="left")
         for mode, label in (("decompile", "Decompile"), ("disasm", "Disasm"), ("summary", "Summary")):
-            ttk.Button(
-                controls,
-                text=label,
-                style="Mode.TButton",
-                command=lambda value=mode: self._set_mode(value),
-            ).pack(side="left", padx=(0, 8))
+            button = self._button(mode_bar, label, lambda value=mode: self._set_mode(value), "mode")
+            button.pack(side="left", padx=(0, 1))
+            self.mode_buttons[mode] = button
 
-        ttk.Label(controls, text="Proto", background="#151c24", foreground="#8f9baa").pack(side="left", padx=(12, 6))
-        proto_entry = ttk.Entry(controls, width=8, textvariable=self.proto)
-        proto_entry.pack(side="left")
+        tk.Label(
+            controls,
+            text="proto",
+            bg=UI_COLORS["panel"],
+            fg=UI_COLORS["muted"],
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(14, 6))
+        proto_entry = tk.Entry(
+            controls,
+            width=6,
+            textvariable=self.proto,
+            bg=UI_COLORS["output"],
+            fg=UI_COLORS["text"],
+            insertbackground=UI_COLORS["text"],
+            relief="flat",
+            bd=0,
+            highlightbackground=UI_COLORS["line"],
+            highlightcolor=UI_COLORS["accent"],
+            highlightthickness=1,
+            font=("Cascadia Mono", 9),
+        )
+        proto_entry.pack(side="left", ipady=4)
         proto_entry.bind("<Return>", lambda _event: self._run())
 
-        ttk.Button(controls, text="Run", style="Accent.TButton", command=self._run).pack(side="right")
-        ttk.Button(controls, text="Clear", command=self._clear).pack(side="right", padx=(0, 8))
+        self._button(controls, "Run", self._run, "accent").pack(side="right")
+        self._button(controls, "Clear", self._clear).pack(side="right", padx=(0, 8))
 
-        body = ttk.Frame(outer, style="Panel.TFrame", padding=1)
+        body = tk.Frame(
+            outer,
+            bg=UI_COLORS["line"],
+            padx=1,
+            pady=1,
+            highlightbackground=UI_COLORS["line"],
+            highlightcolor=UI_COLORS["line"],
+            highlightthickness=1,
+        )
         body.pack(fill="both", expand=True)
 
         self.output = tk.Text(
             body,
-            bg="#0b1016",
-            fg="#e8edf2",
-            insertbackground="#e8edf2",
-            selectbackground="#2a7f62",
+            bg=UI_COLORS["output"],
+            fg=UI_COLORS["text"],
+            insertbackground=UI_COLORS["text"],
+            selectbackground=UI_COLORS["active"],
             selectforeground="#ffffff",
             relief="flat",
             bd=0,
             wrap="none",
             undo=True,
-            padx=14,
-            pady=14,
+            padx=12,
+            pady=10,
             font=("Cascadia Mono", 10),
         )
         self.output.pack(side="left", fill="both", expand=True)
 
-        yscroll = ttk.Scrollbar(body, orient="vertical", command=self.output.yview)
+        yscroll = AutoScrollbar(
+            body,
+            orient="vertical",
+            command=self.output.yview,
+            bg=UI_COLORS["panel_alt"],
+            activebackground=UI_COLORS["control_hover"],
+            troughcolor=UI_COLORS["output"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            width=12,
+        )
         yscroll.pack(side="right", fill="y")
         self.output.configure(yscrollcommand=yscroll.set)
 
-        xscroll = ttk.Scrollbar(outer, orient="horizontal", command=self.output.xview)
+        xscroll = AutoScrollbar(
+            outer,
+            orient="horizontal",
+            command=self.output.xview,
+            bg=UI_COLORS["panel_alt"],
+            activebackground=UI_COLORS["control_hover"],
+            troughcolor=UI_COLORS["output"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            width=12,
+        )
         xscroll.pack(fill="x")
         self.output.configure(xscrollcommand=xscroll.set)
 
-        ttk.Label(self.root, textvariable=self.status, style="Status.TLabel").pack(side="bottom", fill="x")
+        tk.Label(
+            self.root,
+            textvariable=self.status,
+            anchor="w",
+            bg=UI_COLORS["bg"],
+            fg=UI_COLORS["muted"],
+            padx=14,
+            pady=7,
+            font=("Segoe UI", 9),
+        ).pack(side="bottom", fill="x")
+        self._refresh_mode_buttons()
+
+    def _button(self, parent: tk.Misc, text: str, command: object, kind: str = "default") -> tk.Button:
+        if kind == "accent":
+            bg = UI_COLORS["accent"]
+            hover = UI_COLORS["accent_hover"]
+            fg = "#ffffff"
+        elif kind == "mode":
+            bg = UI_COLORS["panel"]
+            hover = UI_COLORS["control_hover"]
+            fg = UI_COLORS["muted"]
+        else:
+            bg = UI_COLORS["control"]
+            hover = UI_COLORS["control_hover"]
+            fg = UI_COLORS["text"]
+
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground=hover,
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=7,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+            highlightthickness=0,
+        )
+        button.bind("<Enter>", lambda _event: button.configure(bg=hover))
+        button.bind("<Leave>", lambda _event: self._restore_button(button, kind))
+        return button
+
+    def _restore_button(self, button: tk.Button, kind: str) -> None:
+        if kind == "accent":
+            button.configure(bg=UI_COLORS["accent"], fg="#ffffff")
+        elif button in self.mode_buttons.values():
+            self._refresh_mode_buttons()
+        else:
+            button.configure(bg=UI_COLORS["control"], fg=UI_COLORS["text"])
+
+    def _refresh_mode_buttons(self) -> None:
+        for mode, button in self.mode_buttons.items():
+            if mode == self.mode.get():
+                button.configure(bg=UI_COLORS["active"], fg=UI_COLORS["text"])
+            else:
+                button.configure(bg=UI_COLORS["panel"], fg=UI_COLORS["muted"])
 
     def _parse_proto(self) -> int | None:
         value = self.proto.get().strip().lower()
@@ -151,6 +305,7 @@ class FlowDecompilerApp:
 
     def _set_mode(self, mode: str) -> None:
         self.mode.set(mode)
+        self._refresh_mode_buttons()
         self._run()
 
     def _open(self) -> None:
@@ -179,7 +334,7 @@ class FlowDecompilerApp:
             return
         self.output.delete("1.0", "end")
         self.output.insert("1.0", output)
-        self.status.set(f"{self.mode.get().title()} complete")
+        self.status.set(f"{self.path.name} -> {self.mode.get()}")
 
     def _save(self) -> None:
         text = self.output.get("1.0", "end-1c")

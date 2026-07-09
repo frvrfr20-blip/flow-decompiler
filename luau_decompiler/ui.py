@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 import json
+import math
+import queue
+import threading
 from dataclasses import asdict
 from pathlib import Path
 import tkinter as tk
@@ -47,6 +50,52 @@ class AutoScrollbar(tk.Scrollbar):
         elif self._pack_options:
             super().pack(**self._pack_options)
         super().set(first, last)
+
+
+class LoadingIndicator(tk.Canvas):
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(
+            parent,
+            width=64,
+            height=18,
+            bd=0,
+            relief="flat",
+            highlightthickness=0,
+            bg=UI_COLORS["bg"],
+        )
+        self.running = False
+        self.phase = 0.0
+        self._after_id: str | None = None
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self.running = True
+        self.grid(row=0, column=1, sticky="e", padx=(10, 0))
+        self._tick()
+
+    def stop(self) -> None:
+        self.running = False
+        if self._after_id:
+            self.after_cancel(self._after_id)
+            self._after_id = None
+        self.delete("all")
+        self.grid_remove()
+
+    def _tick(self) -> None:
+        if not self.running:
+            return
+        self.phase += 0.28
+        self.delete("all")
+        self.create_line(8, 9, 56, 9, fill=UI_COLORS["line"], width=1)
+        for index in range(4):
+            wave = (math.sin(self.phase - index * 0.75) + 1.0) / 2.0
+            radius = 2.2 + wave * 2.2
+            x = 12 + index * 13
+            y = 9 + math.sin(self.phase + index * 0.9) * 3
+            fill = UI_COLORS["accent"] if wave > 0.48 else UI_COLORS["muted"]
+            self.create_oval(x - radius, y - radius, x + radius, y + radius, fill=fill, outline="")
+        self._after_id = self.after(42, self._tick)
 
 
 class ToolTip:
@@ -222,6 +271,8 @@ class FlowDecompilerApp:
         self.status = tk.StringVar(value="Ready")
         self.file_label = tk.StringVar(value=self.path.name if self.path else "No file selected")
         self.mode_buttons: dict[str, tk.Button] = {}
+        self.render_queue: queue.Queue[tuple[int, str, str | None, str, str]] = queue.Queue()
+        self.render_token = 0
 
         self._configure_root()
         self._build()
@@ -351,16 +402,18 @@ class FlowDecompilerApp:
         xscroll.pack(fill="x")
         self.output.configure(xscrollcommand=xscroll.set)
 
+        footer = tk.Frame(self.root, bg=UI_COLORS["bg"], padx=14, pady=7)
+        footer.pack(side="bottom", fill="x")
+        footer.columnconfigure(0, weight=1)
         tk.Label(
-            self.root,
+            footer,
             textvariable=self.status,
             anchor="w",
             bg=UI_COLORS["bg"],
             fg=UI_COLORS["muted"],
-            padx=14,
-            pady=7,
             font=("Segoe UI", 9),
-        ).pack(side="bottom", fill="x")
+        ).grid(row=0, column=0, sticky="ew")
+        self.loader = LoadingIndicator(footer)
         self._refresh_mode_buttons()
 
     def _icon_button(
@@ -427,6 +480,13 @@ class FlowDecompilerApp:
         self._refresh_mode_buttons()
         self._run()
 
+    def _set_busy(self, busy: bool, status: str) -> None:
+        self.status.set(status)
+        if busy:
+            self.loader.start()
+        else:
+            self.loader.stop()
+
     def _open(self) -> None:
         selected = filedialog.askopenfilename(
             title="Open bytecode",
@@ -445,15 +505,43 @@ class FlowDecompilerApp:
         if not self.path:
             self.status.set("Open a bytecode file first")
             return
+
+        self.render_token += 1
+        token = self.render_token
+        path = self.path
+        mode = self.mode.get()
+        self._set_busy(True, f"{path.name} -> {mode}")
+
+        thread = threading.Thread(target=self._render_worker, args=(token, path, mode), daemon=True)
+        thread.start()
+        self.root.after(40, self._poll_render)
+
+    def _render_worker(self, token: int, path: Path, mode: str) -> None:
         try:
-            output = render_file(self.path, self.mode.get())
-        except Exception as exc:  # UI boundary: show parser/decompiler failures without closing the app.
+            output = render_file(path, mode)
+            self.render_queue.put((token, output, None, path.name, mode))
+        except Exception as exc:
+            self.render_queue.put((token, "", str(exc), path.name, mode))
+
+    def _poll_render(self) -> None:
+        try:
+            token, output, error, filename, mode = self.render_queue.get_nowait()
+        except queue.Empty:
+            if self.loader.running:
+                self.root.after(40, self._poll_render)
+            return
+
+        if token != self.render_token:
+            self.root.after(1, self._poll_render)
+            return
+
+        self._set_busy(False, f"{filename} -> {mode}")
+        if error:
             self.status.set("Error")
-            messagebox.showerror("Flow Decompiler", str(exc))
+            messagebox.showerror("Flow Decompiler", error)
             return
         self.output.delete("1.0", "end")
         self.output.insert("1.0", output)
-        self.status.set(f"{self.path.name} -> {self.mode.get()}")
 
     def _save(self) -> None:
         text = self.output.get("1.0", "end-1c")

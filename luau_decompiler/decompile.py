@@ -105,6 +105,15 @@ _SOURCELESS_OPS = {"NOP", "BREAK", "PREPVARARGS", "CLOSEUPVALS", "COVERAGE", "NA
 
 _INFIX_TOKENS = (" + ", " - ", " * ", " / ", " % ", " ^ ", " // ", " and ", " or ", " .. ")
 
+_NEGATED_COMPARISON_OPS = {
+    " == ": " ~= ",
+    " ~= ": " == ",
+    " <= ": " > ",
+    " >= ": " < ",
+    " < ": " >= ",
+    " > ": " <= ",
+}
+
 _ROBLOX_SERVICE_NAMES = {
     "CollectionService",
     "ContextActionService",
@@ -234,12 +243,36 @@ def _group_if_needed(value: str) -> str:
     return value
 
 
+def _has_comparison_expr(value: str) -> bool:
+    return any(operator in value for operator in _NEGATED_COMPARISON_OPS)
+
+
+def _negated_comparison_expr(value: str) -> str | None:
+    if value.startswith("(") and value.endswith(")"):
+        return None
+    if " and " in value or " or " in value:
+        return None
+    for operator, negated in _NEGATED_COMPARISON_OPS.items():
+        if operator not in value:
+            continue
+        left, right = value.split(operator, 1)
+        if not left.strip() or not right.strip():
+            return None
+        return f"{_group_if_needed(left.strip())}{negated}{_group_if_needed(right.strip())}"
+    return None
+
+
 def _binary_expr(left: str, operator: str, right: str) -> str:
     return f"{_group_if_needed(left)} {operator} {_group_if_needed(right)}"
 
 
 def _unary_expr(operator: str, value: str) -> str:
     if operator == "not":
+        negated_comparison = _negated_comparison_expr(value)
+        if negated_comparison is not None:
+            return negated_comparison
+        if _has_comparison_expr(value):
+            return f"not ({value})"
         return f"not {_group_if_needed(value)}"
     return f"{operator}{_group_if_needed(value)}"
 

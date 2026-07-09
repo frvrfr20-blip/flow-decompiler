@@ -4654,6 +4654,53 @@ def make_comparison_boolean_value_chunk():
     return bytes(out)
 
 
+def make_negated_comparison_boolean_value_chunk():
+    strings = ["print", "flag"]
+    words = [
+        encode_ad("LOADN", 0, 1),
+        encode_ad("LOADN", 1, 2),
+        encode_ad("JUMPIFNOTLT", 0, 2),
+        1,
+        encode_abc("LOADB", 2, 0, 1),
+        encode_abc("LOADB", 2, 1, 0),
+        encode_ad("GETIMPORT", 3, 1),
+        import_id(0),
+        encode_abc("MOVE", 4, 2, 0),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(1)
+    out += varint(2)
+    out += varint(6)
+    out += varint(10)
+    out.append(2)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_loadb_skip_call_chunk():
     strings = ["print"]
     words = [
@@ -8063,6 +8110,15 @@ class ChunkTests(unittest.TestCase):
         self.assertIn("local flag = 1 < 2\nprint(flag)", source)
         self.assertNotIn("JUMPIFNOTLT", source)
         self.assertNotIn("LOADB", source)
+
+    def test_decompile_negated_comparison_boolean_value(self):
+        chunk = parse_chunk(make_negated_comparison_boolean_value_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local flag = 1 >= 2\nprint(flag)", source)
+        self.assertNotIn("not 1 < 2", source)
+        self.assertNotIn("JUMPIFNOTLT", source)
 
     def test_decompile_loadb_skip_does_not_process_skipped_assignment(self):
         chunk = parse_chunk(make_loadb_skip_call_chunk())

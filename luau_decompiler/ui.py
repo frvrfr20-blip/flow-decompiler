@@ -15,6 +15,7 @@ from .analysis import summarize_proto
 from .binary import maybe_base64_decode
 from .chunk import parse_chunk
 from .decompile import decompile_chunk
+from .settings import FlowSettings, load_settings, set_launch_at_sign_in
 
 
 MODES = ("decompile", "disasm", "summary")
@@ -238,6 +239,19 @@ class IconButton(tk.Canvas):
             self._line([(6, 6), (7, 21), (17, 21), (18, 6)], color)
             self._line([(10, 10), (10, 17)], color)
             self._line([(14, 10), (14, 17)], color)
+        elif icon == "settings":
+            self._poly(
+                [
+                    (10, 2), (14, 2), (15, 5), (17, 6), (20, 5), (22, 8),
+                    (20, 10), (20, 14), (22, 16), (20, 19), (17, 18), (15, 19),
+                    (14, 22), (10, 22), (9, 19), (7, 18), (4, 19), (2, 16),
+                    (4, 14), (4, 10), (2, 8), (4, 5), (7, 6), (9, 5),
+                ],
+                color,
+            )
+            ax, ay = self._xy(9, 9)
+            bx, by = self._xy(15, 15)
+            self.create_oval(ax, ay, bx, by, outline=color, width=2)
 
 
 def _load_bytes(path: Path) -> bytes:
@@ -309,6 +323,8 @@ class FlowDecompilerApp:
         self.mode_buttons: dict[str, tk.Button] = {}
         self.render_queue: queue.Queue[tuple[int, str, str | None, str, str]] = queue.Queue()
         self.render_token = 0
+        self.settings: FlowSettings = load_settings()
+        self.settings_window: tk.Toplevel | None = None
 
         self._configure_root()
         self._build()
@@ -358,6 +374,7 @@ class FlowDecompilerApp:
         self._icon_button(header, "folder-open", self._open, "Open", "accent").pack(side="right")
         self._icon_button(header, "save", self._save, "Save").pack(side="right", padx=(0, 8))
         self._icon_button(header, "copy", self._copy, "Copy").pack(side="right", padx=(0, 8))
+        self._icon_button(header, "settings", self._open_settings, "Settings").pack(side="right", padx=(0, 8))
 
         controls = tk.Frame(
             outer,
@@ -524,6 +541,71 @@ class FlowDecompilerApp:
         else:
             self.loader.stop()
 
+    def _open_settings(self) -> None:
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.focus_force()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.settings_window = window
+        window.title("Settings")
+        window.configure(bg=UI_COLORS["bg"])
+        window.resizable(False, False)
+        window.transient(self.root)
+
+        content = tk.Frame(window, bg=UI_COLORS["bg"], padx=18, pady=16)
+        content.pack(fill="both", expand=True)
+        tk.Label(
+            content,
+            text="Settings",
+            bg=UI_COLORS["bg"],
+            fg=UI_COLORS["text"],
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", pady=(0, 12))
+
+        enabled = tk.BooleanVar(value=self.settings.launch_at_sign_in)
+        checkbox = tk.Checkbutton(
+            content,
+            text="Launch minimized at sign-in",
+            variable=enabled,
+            command=lambda: self._toggle_launch_at_sign_in(enabled),
+            bg=UI_COLORS["bg"],
+            fg=UI_COLORS["text"],
+            activebackground=UI_COLORS["bg"],
+            activeforeground=UI_COLORS["text"],
+            selectcolor=UI_COLORS["panel_alt"],
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+        )
+        checkbox.pack(anchor="w")
+
+        window.update_idletasks()
+        width, height = 320, 112
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - width) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - height) // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.protocol("WM_DELETE_WINDOW", self._close_settings)
+        window.grab_set()
+
+    def _close_settings(self) -> None:
+        if self.settings_window:
+            self.settings_window.destroy()
+            self.settings_window = None
+
+    def _toggle_launch_at_sign_in(self, enabled: tk.BooleanVar) -> None:
+        previous = self.settings.launch_at_sign_in
+        desired = bool(enabled.get())
+        try:
+            self.settings = set_launch_at_sign_in(desired)
+        except Exception as exc:
+            enabled.set(previous)
+            self.status.set("Could not update startup setting")
+            messagebox.showerror("Flow Decompiler", str(exc), parent=self.settings_window)
+            return
+        self.status.set("Launch at sign-in enabled" if desired else "Launch at sign-in disabled")
+
     def _on_text_modified(self, _event: tk.Event[tk.Widget]) -> None:
         if not self.output.edit_modified():
             return
@@ -644,13 +726,25 @@ class FlowDecompilerApp:
         self.status.set("Cleared")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Flow Decompiler UI")
     parser.add_argument("input", nargs="?", help="Optional bytecode file to open")
+    parser.add_argument("--minimized", action="store_true", help="Start minimized")
+    return parser
+
+
+def _apply_startup_state(root: tk.Tk, *, minimized: bool) -> None:
+    if minimized:
+        root.after_idle(root.iconify)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     root = tk.Tk()
     FlowDecompilerApp(root, args.input)
+    _apply_startup_state(root, minimized=args.minimized)
     root.mainloop()
     return 0
 

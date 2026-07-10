@@ -3,10 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from luau_decompiler.ui import _active_source
+from luau_decompiler.ui import _active_source, _apply_startup_state, _build_parser
 
 
 class UiInputStateTests(unittest.TestCase):
+    def test_ui_parser_accepts_minimized(self):
+        self.assertTrue(_build_parser().parse_args(["--minimized"]).minimized)
+
+    def test_minimized_launch_schedules_iconify(self):
+        class Root:
+            def __init__(self):
+                self.callback = None
+
+            def iconify(self):
+                return None
+
+            def after_idle(self, callback):
+                self.callback = callback
+
+        root = Root()
+
+        _apply_startup_state(root, minimized=True)
+
+        self.assertEqual(root.callback, root.iconify)
+
     def test_pasted_text_overrides_selected_file_after_user_edit(self):
         selected = Path("old.b64")
 

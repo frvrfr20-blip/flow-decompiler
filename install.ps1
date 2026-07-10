@@ -12,10 +12,12 @@ $ProjectRoot = $PSScriptRoot
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Flow Decompiler"
 $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Flow Decompiler.lnk"
 $StartMenuShortcut = Join-Path $StartMenuDir "Flow Decompiler.lnk"
+$StartupShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\Flow Decompiler.lnk"
 
 function Remove-FlowDecompiler {
     Remove-Item -LiteralPath $DesktopShortcut -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $StartMenuShortcut -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $StartupShortcut -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $StartMenuDir) {
         Remove-Item -LiteralPath $StartMenuDir -Force -Recurse
     }
@@ -73,12 +75,21 @@ New-Item -ItemType Directory -Path $InstallRoot, $StartMenuDir -Force | Out-Null
 
 if (-not (Test-Path -LiteralPath (Join-Path $VenvRoot "Scripts\python.exe"))) {
     & $python.File @($python.Args + @("-m", "venv", $VenvRoot))
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not create the Flow Decompiler environment."
+    }
 }
 
 $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
 $VenvPythonw = Join-Path $VenvRoot "Scripts\pythonw.exe"
 & $VenvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not update pip."
+}
 & $VenvPython -m pip install $ProjectRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install Flow Decompiler."
+}
 
 New-Shortcut -Path $StartMenuShortcut -Target $VenvPythonw -Arguments "-m luau_decompiler.ui" -WorkingDirectory $InstallRoot
 if (-not $NoDesktopShortcut) {

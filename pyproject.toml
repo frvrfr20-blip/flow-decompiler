@@ -10,3 +10,6 @@ license = "MIT"
 flow-decompiler = "luau_decompiler.cli:main"
 luau-decompiler = "luau_decompiler.cli:main"
 flow-decompiler-ui = "luau_decompiler.ui:main"
+
+[tool.setuptools.packages.find]
+include = ["luau_decompiler*"]

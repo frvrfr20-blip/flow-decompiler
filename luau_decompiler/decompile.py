@@ -233,6 +233,8 @@ def _call_expr(function: str, args: list[str]) -> str:
 
 def _namecall_expr(receiver: str, method: str, args: list[str]) -> str:
     receiver = _group_if_needed(receiver)
+    if _unquote_string_literal(receiver) is not None:
+        receiver = f"({receiver})"
     if _is_identifier(method):
         return f"{receiver}:{method}{_call_args_source(args)}"
     all_args = [receiver, *args]
@@ -474,8 +476,19 @@ def _trim_trailing_nil(values: list[str]) -> list[str]:
     return out
 
 
-def _parameter_names(proto: Proto) -> list[str]:
-    params = [_debug_local_name(proto, reg_id, 0) or f"p{reg_id}" for reg_id in range(proto.numparams)]
+def _parameter_names(proto: Proto, reserved_names: set[str] | None = None) -> list[str]:
+    used_names = set(reserved_names or ())
+    used_names.update(name for name in proto.debug_upvalues if name and _is_identifier(name))
+    params = []
+    for reg_id in range(proto.numparams):
+        base_name = _debug_local_name(proto, reg_id, 0) or f"p{reg_id}"
+        name = base_name
+        suffix = 2
+        while name in used_names:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+        params.append(name)
+        used_names.add(name)
     if proto.is_vararg:
         params.append("...")
     return params
@@ -508,7 +521,7 @@ def _closure_constant_proto(proto: Proto, index: int, protos: list[Proto] | None
 
 
 def _function_expr(proto: Proto, protos: list[Proto] | None, upvalue_names: dict[int, str] | None = None) -> str:
-    params = ", ".join(_parameter_names(proto))
+    params = ", ".join(_parameter_names(proto, set(upvalue_names.values()) if upvalue_names else None))
     body = decompile_proto(proto, protos, upvalue_names).rstrip()
     if not body:
         return f"function({params})\nend"
@@ -544,8 +557,9 @@ def decompile_proto(
     upvalue_names: dict[int, str] | None = None,
 ) -> str:
     lines = []
+    parameter_names = _parameter_names(proto, set(upvalue_names.values()) if upvalue_names else None)
     regs: dict[int, str] = {
-        reg_id: _debug_local_name(proto, reg_id, 0) or f"p{reg_id}" for reg_id in range(proto.numparams)
+        reg_id: parameter_names[reg_id] for reg_id in range(proto.numparams)
     }
     table_literals: dict[int, TableLiteral] = {}
     pending_table_locals: dict[int, tuple[str, tuple[int, str, int, int]]] = {}
@@ -586,7 +600,12 @@ def decompile_proto(
         *,
         declare_local: bool = True,
     ) -> None:
-        params = ", ".join(_parameter_names(child))
+        params = ", ".join(
+            _parameter_names(
+                child,
+                set(child_upvalue_names.values()) if child_upvalue_names else None,
+            )
+        )
         keyword = "local function" if declare_local else "function"
         emit_line(indent, f"{keyword} {name}({params})")
         for line in _function_body_lines(child, protos, child_upvalue_names):
@@ -1347,6 +1366,31 @@ def decompile_proto(
                         seen.add(resolved_reg_id)
                     scan += 1
 
+        def materialize_table_reads(ranges: list[tuple[int, int]], indent: int) -> None:
+            seen_tables: set[int] = set()
+            for reg_id, table in list(table_literals.items()):
+                table_id = id(table)
+                if table.materialized or table_id in seen_tables:
+                    continue
+                seen_tables.add(table_id)
+                aliases = [
+                    alias_id
+                    for alias_id, candidate in table_literals.items()
+                    if candidate is table
+                ]
+                should_materialize = False
+                for start, end_pc in ranges:
+                    for candidate in instructions[start:]:
+                        if candidate.pc >= end_pc:
+                            break
+                        if any(instruction_reads_register(candidate, alias_id) for alias_id in aliases):
+                            should_materialize = True
+                            break
+                    if should_materialize:
+                        break
+                if should_materialize:
+                    materialize_table_reg(reg_id, indent)
+
         def materialize_branch_liveout_registers(
             ranges: list[tuple[int, int]],
             end_index: int | None,
@@ -1549,6 +1593,12 @@ def decompile_proto(
             return f"{local_name}_{suffix}"
 
         def declare_inferred_local(reg_id: int, local_name: str | None, value: str, indent: int) -> bool:
+            mutable_name = mutable_capture_locals.get(reg_id)
+            if mutable_name is not None:
+                if value != mutable_name:
+                    emit_line(indent, f"{mutable_name} = {value}")
+                set_reg(reg_id, mutable_name)
+                return True
             if local_name is None or not _is_identifier(local_name):
                 return False
             local_name = unique_inferred_local_name(local_name)
@@ -1568,11 +1618,17 @@ def decompile_proto(
                 return candidate.a <= reg_id < candidate.a + candidate.b
             if name == "RETURN" and candidate.b > 1:
                 return candidate.a <= reg_id < candidate.a + candidate.b - 1
+            if name in {"SETGLOBAL", "SETUPVAL"}:
+                return candidate.a == reg_id
+            if name == "NEWCLASSMEMBER":
+                return candidate.a == reg_id or candidate.c == reg_id
             if name in {"GETTABLEKS", "GETUDATAKS", "NAMECALL", "NAMECALLUDATA", "GETTABLEN"}:
                 return candidate.b == reg_id
             if name == "GETTABLE":
                 return candidate.b == reg_id or candidate.c == reg_id
             if name in {"SETTABLEKS", "SETUDATAKS"}:
+                return candidate.a == reg_id or candidate.b == reg_id
+            if name == "SETTABLEN":
                 return candidate.a == reg_id or candidate.b == reg_id
             if name == "SETTABLE":
                 return candidate.a == reg_id or candidate.b == reg_id or candidate.c == reg_id
@@ -1639,6 +1695,79 @@ def decompile_proto(
                 if instruction_writes_register(candidate, reg_id):
                     break
             return count
+
+        def future_register_read_needs_snapshot(start_index: int, reg_id: int) -> bool:
+            read_indexes: list[int] = []
+            for scan_index in range(start_index, len(instructions)):
+                candidate = instructions[scan_index]
+                if instruction_reads_register(candidate, reg_id):
+                    read_indexes.append(scan_index)
+                if instruction_writes_register(candidate, reg_id):
+                    break
+
+            if len(read_indexes) > 1:
+                return True
+            if not read_indexes:
+                return False
+
+            first_read_index = read_indexes[0]
+            barrier_ops = {
+                "CALL",
+                "CALLFB",
+                "FORGLOOP",
+                "FORGPREP",
+                "FORGPREP_INEXT",
+                "FORGPREP_NEXT",
+                "FORNLOOP",
+                "FORNPREP",
+                "JUMP",
+                "JUMPBACK",
+                "JUMPX",
+                "SETGLOBAL",
+                "SETLIST",
+                "SETTABLE",
+                "SETTABLEKS",
+                "SETTABLEN",
+                "SETUDATAKS",
+                "SETUPVAL",
+            }
+            for scan_index in range(start_index, first_read_index):
+                name = instructions[scan_index].op.name
+                if name in barrier_ops or name in _CONDITIONAL_JUMP_OPS:
+                    return True
+
+            definition_index = start_index - 1
+            if definition_index < 0:
+                return False
+            definition_pc = instructions[definition_index].pc
+            read_pc = instructions[first_read_index].pc
+            for scan_index in range(first_read_index + 1, len(instructions)):
+                candidate = instructions[scan_index]
+                if instruction_writes_register(candidate, reg_id):
+                    break
+                if candidate.op.name not in {"FORGLOOP", "FORNLOOP", "JUMPBACK"}:
+                    continue
+                target = candidate.jump_target
+                if target is not None and definition_pc < target <= read_pc <= candidate.pc:
+                    return True
+            return False
+
+        def set_reg_or_materialize_expression(
+            instruction_index: int,
+            reg_id: int,
+            value: str,
+            pc: int,
+            indent: int,
+            inferred_name: str | None = None,
+        ) -> None:
+            if (
+                reg_id >= proto.numparams
+                and _debug_local_name(proto, reg_id, pc) is None
+                and future_register_read_needs_snapshot(instruction_index + 1, reg_id)
+                and declare_inferred_local(reg_id, inferred_name or f"r{reg_id}", value, indent)
+            ):
+                return
+            set_reg_or_declare_local(reg_id, value, pc, indent)
 
         def materialize_upvalue_snapshots(
             instruction_index: int,
@@ -1749,6 +1878,8 @@ def decompile_proto(
             elif name == "GETTABLE":
                 reads.update({insn.b, insn.c})
             elif name in {"SETTABLEKS", "SETUDATAKS"}:
+                reads.add(insn.a)
+            elif name == "SETTABLEN":
                 reads.add(insn.a)
             elif name == "SETTABLE":
                 reads.update({insn.a, insn.c})
@@ -2940,7 +3071,10 @@ def decompile_proto(
                     if current_index is None or current_index >= len(instructions):
                         break
                     candidate = instructions[current_index]
+                    or_state = snapshot_state()
                     or_chain = parse_or_condition_chain(current_index, target)
+                    if or_chain is None:
+                        restore_state(or_state)
                     if or_chain is not None:
                         or_condition, or_body_index, or_end_index = or_chain
                         if or_end_index == target_index:
@@ -3106,6 +3240,7 @@ def decompile_proto(
                             iterator_values = _trim_trailing_nil([reg(insn.a), reg(insn.a + 1), reg(insn.a + 2)])
 
                         loop_end_index = pc_to_index.get(maybe_loop.next_pc)
+                        materialize_table_reads([(body_index, maybe_loop.pc)], indent)
                         materialize_table_writes([(body_index, maybe_loop.pc)], indent)
                         materialize_branch_liveout_registers([(body_index, maybe_loop.pc)], loop_end_index, indent)
                         saved_regs = dict(regs)
@@ -3152,6 +3287,7 @@ def decompile_proto(
                         step_value = reg(insn.a + 1)
 
                         loop_end_index = pc_to_index.get(maybe_loop.next_pc)
+                        materialize_table_reads([(body_index, maybe_loop.pc)], indent)
                         materialize_table_writes([(body_index, maybe_loop.pc)], indent)
                         materialize_branch_liveout_registers([(body_index, maybe_loop.pc)], loop_end_index, indent)
                         saved_regs = dict(regs)
@@ -3335,11 +3471,13 @@ def decompile_proto(
                     index = folded_index
                     continue
 
+                folded_state = snapshot_state()
                 folded_index = folded_while_grouped_or_loop_index(insn, indent)
                 if folded_index is not None:
                     open_results = None
                     index = folded_index
                     continue
+                restore_state(folded_state)
 
                 folded_index = folded_while_or_loop_index(insn, indent)
                 if folded_index is not None:
@@ -3414,6 +3552,7 @@ def decompile_proto(
                 condition = jump_fallthrough_condition(insn)
                 if condition in {"true", "false", "not true", "not false"}:
                     condition = recover_constant_condition_from_previous_call(index, insn) or condition
+                direct_condition = condition
                 if (
                     condition is not None
                     and target is not None
@@ -3592,6 +3731,8 @@ def decompile_proto(
                         ranges.append((else_index, end_pc))
                     materialize_table_writes(ranges, indent)
                     materialize_branch_liveout_registers(ranges, pc_to_index.get(end_pc), indent)
+                    if condition == direct_condition:
+                        condition = jump_fallthrough_condition(insn) or condition
 
                     saved_regs = dict(regs)
                     saved_tables = clone_tables()
@@ -3656,7 +3797,7 @@ def decompile_proto(
                     if (
                         debug_name is None
                         and repeated_expression
-                        and future_register_read_count(index + 1, insn.a) > 1
+                        and future_register_read_needs_snapshot(index + 1, insn.a)
                     ):
                         declare_inferred_local(insn.a, f"r{insn.a}", value, indent)
                     else:
@@ -3742,26 +3883,41 @@ def decompile_proto(
             elif name == "DUPTABLE":
                 set_table_reg(insn.a, _duptable_literal(proto, insn.d), insn.next_pc, indent)
             elif name in _BINARY_OPS:
-                set_reg_or_declare_local(insn.a, _binary_expr(reg(insn.b), _BINARY_OPS[name], reg(insn.c)), insn.next_pc, indent)
+                set_reg_or_materialize_expression(
+                    index,
+                    insn.a,
+                    _binary_expr(reg(insn.b), _BINARY_OPS[name], reg(insn.c)),
+                    insn.next_pc,
+                    indent,
+                )
             elif name in _BINARY_K_OPS:
-                set_reg_or_declare_local(
+                set_reg_or_materialize_expression(
+                    index,
                     insn.a,
                     _binary_expr(reg(insn.b), _BINARY_K_OPS[name], _literal(proto, insn.c)),
                     insn.next_pc,
                     indent,
                 )
             elif name in _REVERSE_K_OPS:
-                set_reg_or_declare_local(
+                set_reg_or_materialize_expression(
+                    index,
                     insn.a,
                     _binary_expr(_literal(proto, insn.b), _REVERSE_K_OPS[name], reg(insn.c)),
                     insn.next_pc,
                     indent,
                 )
             elif name in _UNARY_OPS:
-                set_reg_or_declare_local(insn.a, _unary_expr(_UNARY_OPS[name], reg(insn.b)), insn.next_pc, indent)
+                set_reg_or_materialize_expression(
+                    index,
+                    insn.a,
+                    _unary_expr(_UNARY_OPS[name], reg(insn.b)),
+                    insn.next_pc,
+                    indent,
+                )
             elif name == "CONCAT":
                 values = [reg(item) for item in range(insn.b, insn.c + 1)]
-                set_reg_or_declare_local(
+                set_reg_or_materialize_expression(
+                    index,
                     insn.a,
                     f" .. ".join(_group_if_needed(value) for value in values),
                     insn.next_pc,
@@ -3776,13 +3932,33 @@ def decompile_proto(
                 inferred_name = inferred_field_local_name(receiver, key)
                 if debug_name is None and future_register_read_count(index + 1, insn.a) > 0:
                     if not declare_inferred_local(insn.a, inferred_name, field, indent):
-                        set_reg_or_declare_local(insn.a, field, insn.next_pc, indent)
+                        if future_register_read_needs_snapshot(index + 1, insn.a):
+                            declare_inferred_local(
+                                insn.a,
+                                key if _is_identifier(key) else f"r{insn.a}",
+                                field,
+                                indent,
+                            )
+                        else:
+                            set_reg_or_declare_local(insn.a, field, insn.next_pc, indent)
                 else:
                     set_reg_or_declare_local(insn.a, field, insn.next_pc, indent)
             elif name == "GETTABLE":
-                set_reg_or_declare_local(insn.a, _index_expr(reg(insn.b), reg(insn.c)), insn.next_pc, indent)
+                set_reg_or_materialize_expression(
+                    index,
+                    insn.a,
+                    _index_expr(reg(insn.b), reg(insn.c)),
+                    insn.next_pc,
+                    indent,
+                )
             elif name == "GETTABLEN":
-                set_reg_or_declare_local(insn.a, f"{reg(insn.b)}[{insn.c + 1}]", insn.next_pc, indent)
+                set_reg_or_materialize_expression(
+                    index,
+                    insn.a,
+                    f"{reg(insn.b)}[{insn.c + 1}]",
+                    insn.next_pc,
+                    indent,
+                )
             elif name == "SETLIST" and insn.aux is not None:
                 table = table_literals.get(insn.a)
                 values = open_args(insn.b) if insn.c == 0 else [reg(insn.b + offset) for offset in range(max(insn.c - 1, 0))]
@@ -3891,6 +4067,12 @@ def decompile_proto(
                 elif result_count > 0:
                     next_insn = instructions[index + 1] if index + 1 < len(instructions) else None
                     if (
+                        result_count == 1
+                        and _debug_local_name(proto, insn.a, insn.next_pc) is None
+                        and future_register_read_count(index + 1, insn.a) == 0
+                    ):
+                        emit_line(indent, call)
+                    elif (
                         result_count == 3
                         and next_insn is not None
                         and next_insn.op.name in {"FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT"}
@@ -3922,7 +4104,7 @@ def decompile_proto(
                             inferred_name = inferred_namecall_local_name(receiver, method, args)
                             if declare_inferred_local(insn.a, inferred_name, call, indent):
                                 pass
-                            elif future_register_read_count(index + 1, insn.a) > 1:
+                            elif future_register_read_needs_snapshot(index + 1, insn.a):
                                 local_name = unique_inferred_local_name(f"r{insn.a}")
                                 key = local_key(insn.a, local_name, insn.next_pc)
                                 if key not in declared_locals:
@@ -3938,12 +4120,12 @@ def decompile_proto(
                     else:
                         module_name = inferred_require_name(call_target or "", args)
                         debug_name = _debug_local_name(proto, insn.a, insn.next_pc)
-                        if module_name is not None and debug_name is None and future_register_read_count(index + 1, insn.a) > 1:
+                        if module_name is not None and debug_name is None and future_register_read_needs_snapshot(index + 1, insn.a):
                             if module_name not in inferred_locals:
                                 emit_line(indent, f"local {module_name} = {call}")
                                 inferred_locals.add(module_name)
                             set_reg(insn.a, module_name)
-                        elif debug_name is None and future_register_read_count(index + 1, insn.a) > 1:
+                        elif debug_name is None and future_register_read_needs_snapshot(index + 1, insn.a):
                             if not declare_inferred_local(insn.a, f"r{insn.a}", call, indent):
                                 set_reg_or_declare_local(insn.a, call, insn.next_pc, indent)
                         else:
@@ -4008,7 +4190,7 @@ def decompile_proto(
                 if insn.jump_target != insn.next_pc:
                     emit_line(indent, f"-- pc {insn.pc}: {insn.disassemble()}")
             elif name in FASTCALL_OPS:
-                open_results = None
+                pass
             elif name not in _SOURCELESS_OPS:
                 open_results = None
                 emit_line(indent, f"-- pc {insn.pc}: {insn.disassemble()}")

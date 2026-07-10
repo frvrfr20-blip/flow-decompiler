@@ -384,6 +384,149 @@ def make_fastcall_fallback_call_chunk():
     return bytes(out)
 
 
+def make_unused_single_call_result_chunk():
+    strings = ["initialize"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("CALL", 0, 1, 2),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_call_result_global_assignment_chunk():
+    strings = ["compute", "result"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("CALL", 0, 1, 2),
+        encode_abc("SETGLOBAL", 0, 0, 0),
+        1,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(len(strings))
+    for string_id in range(1, len(strings) + 1):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_fastcall_open_argument_chunk():
+    strings = ["first", "producer", "consume"]
+    words = [
+        encode_ad("LOADK", 2, 0),
+        encode_abc("GETGLOBAL", 3, 0, 0),
+        1,
+        encode_abc("CALL", 3, 1, 0),
+        encode_abc("FASTCALL", 52, 0, 2),
+        encode_abc("GETGLOBAL", 1, 0, 0),
+        2,
+        encode_abc("CALL", 1, 0, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(len(strings))
+    for string_id in range(1, len(strings) + 1):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_failed_loop_probe_preserves_call_condition_chunk():
+    strings = ["IsDescendantOf"]
+    words = [
+        encode_abc("MOVE", 5, 2, 0),
+        encode_abc("NAMECALL", 3, 0, 0),
+        0,
+        encode_abc("CALL", 3, 3, 2),
+        encode_ad("JUMPIF", 3, 3),
+        encode_abc("MOVE", 3, 1, 0),
+        encode_abc("CALL", 3, 1, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 3, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(len(strings))
+    for string_id in range(1, len(strings) + 1):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_closeupvals_call_chunk():
     strings = ["print", "ok"]
     words = [
@@ -1359,6 +1502,53 @@ def make_loop_mutated_table_dynamic_key_chunk():
     out += varint(9)
     out.append(5)
     out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_nested_table_read_inside_loop_chunk():
+    strings = ["Particles", "next", "items"]
+    words = [
+        encode_abc("NEWTABLE", 0, 0, 0),
+        0,
+        encode_abc("NEWTABLE", 1, 0, 0),
+        0,
+        encode_abc("SETTABLEKS", 1, 0, 0),
+        0,
+        encode_abc("GETGLOBAL", 1, 0, 0),
+        1,
+        encode_abc("GETGLOBAL", 2, 0, 0),
+        2,
+        encode_abc("LOADNIL", 3, 0, 0),
+        encode_ad("FORGPREP", 1, 3),
+        encode_abc("GETTABLEKS", 5, 0, 0),
+        0,
+        encode_abc("SETTABLE", 4, 5, 4),
+        encode_ad("FORGLOOP", 1, -4),
+        2,
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(len(strings))
+    for string_id in range(1, len(strings) + 1):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
     out += varint(0)
     return bytes(out)
 
@@ -6913,6 +7103,266 @@ def make_reused_call_result_through_move_chunk():
     return bytes(out)
 
 
+def make_delayed_single_call_result_chunk():
+    strings = ["clock", "wait"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("CALL", 0, 1, 2),
+        encode_abc("GETGLOBAL", 1, 0, 0),
+        1,
+        encode_abc("CALL", 1, 1, 1),
+        encode_abc("GETGLOBAL", 1, 0, 0),
+        0,
+        encode_abc("CALL", 1, 1, 2),
+        encode_abc("SUB", 2, 1, 0),
+        encode_abc("RETURN", 2, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    for string_id in range(1, 3):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_reused_binary_result_chunk():
+    strings = ["print"]
+    words = [
+        encode_abc("SUB", 2, 0, 1),
+        encode_abc("GETGLOBAL", 3, 0, 0),
+        0,
+        encode_abc("MOVE", 4, 2, 0),
+        encode_abc("MOVE", 5, 2, 0),
+        encode_abc("CALL", 3, 3, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_loop_property_snapshot_chunk():
+    strings = ["workspace", "CurrentCamera", "Position", "next", "items", "print"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("GETTABLEKS", 1, 0, 0),
+        1,
+        encode_abc("GETTABLEKS", 1, 1, 0),
+        2,
+        encode_abc("GETGLOBAL", 2, 0, 0),
+        3,
+        encode_abc("GETGLOBAL", 3, 0, 0),
+        4,
+        encode_abc("LOADNIL", 4, 0, 0),
+        encode_ad("FORGPREP", 2, 4),
+        encode_abc("GETGLOBAL", 7, 0, 0),
+        5,
+        encode_abc("MOVE", 8, 1, 0),
+        encode_abc("CALL", 7, 2, 1),
+        encode_ad("FORGLOOP", 2, -5),
+        2,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([9, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(len(strings))
+    for string_id in range(1, len(strings) + 1):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_branch_condition_reused_register_chunk():
+    strings = ["Texture", "IsA", "Parent", "BasePart", "print"]
+    words = [
+        encode_ad("LOADK", 3, 0),
+        encode_abc("NAMECALL", 1, 0, 0),
+        1,
+        encode_abc("CALL", 1, 3, 2),
+        encode_ad("JUMPIF", 1, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_abc("GETTABLEKS", 1, 0, 0),
+        2,
+        encode_ad("JUMPIFNOT", 1, 5),
+        encode_ad("LOADK", 4, 3),
+        encode_abc("NAMECALL", 2, 1, 0),
+        1,
+        encode_abc("CALL", 2, 3, 2),
+        encode_ad("JUMPIF", 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+        encode_abc("GETGLOBAL", 2, 0, 0),
+        4,
+        encode_abc("MOVE", 3, 1, 0),
+        encode_abc("CALL", 2, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(len(strings))
+    for string_id in range(1, len(strings) + 1):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_short_circuit_indexed_guard_chunk():
+    strings = ["Particles", "print"]
+    words = [
+        encode_ad("JUMPIFNOT", 0, 9),
+        encode_abc("GETTABLE", 2, 1, 0),
+        encode_ad("JUMPIFNOT", 2, 7),
+        encode_abc("GETTABLEKS", 2, 2, 0),
+        0,
+        encode_abc("GETTABLE", 2, 2, 0),
+        encode_ad("JUMPIFNOT", 2, 3),
+        encode_abc("GETGLOBAL", 3, 0, 0),
+        1,
+        encode_abc("CALL", 3, 1, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(len(strings))
+    for string_id in range(1, len(strings) + 1):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_child_parameter_capture_collision_chunk():
+    main_words = [
+        encode_ad("NEWCLOSURE", 1, 0),
+        encode_abc("CAPTURE", 0, 0, 0),
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+    child_words = [
+        encode_abc("GETUPVAL", 1, 0, 0),
+        encode_abc("GETTABLE", 1, 1, 0),
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([2, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += bytes([2, 1, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
 def make_expression_callee_call_chunk():
     strings = ["f", "g"]
     words = [
@@ -7839,6 +8289,37 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(source.splitlines()[-1], 'assert("ok")')
         self.assertNotIn("FASTCALL", source)
 
+    def test_decompile_emits_unused_single_call_result(self):
+        chunk = parse_chunk(make_unused_single_call_result_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertEqual(source.splitlines()[-1], "initialize()")
+
+    def test_decompile_call_result_written_to_global_is_not_dropped(self):
+        chunk = parse_chunk(make_call_result_global_assignment_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("result = compute()", source)
+        self.assertEqual(source.count("compute()"), 1)
+
+    def test_decompile_fastcall_preserves_open_arguments(self):
+        chunk = parse_chunk(make_fastcall_open_argument_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn('consume("first", producer())', source)
+        self.assertNotIn("consume()", source)
+
+    def test_decompile_failed_loop_probe_preserves_call_condition(self):
+        chunk = parse_chunk(make_failed_loop_probe_preserves_call_condition_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if not p0:IsDescendantOf(p2) then", source)
+        self.assertNotIn("if not p1 then", source)
+
     def test_decompile_omits_closeupvals_lifetime_marker(self):
         chunk = parse_chunk(make_closeupvals_call_chunk())
 
@@ -8059,6 +8540,16 @@ class ChunkTests(unittest.TestCase):
             source,
         )
         self.assertNotIn("return {}", source)
+
+    def test_decompile_nested_table_read_materializes_before_loop(self):
+        chunk = parse_chunk(make_nested_table_read_inside_loop_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0 = {Particles = {}}", source)
+        self.assertIn("r0.Particles[r4] = r4", source)
+        self.assertLess(source.index("local r0 ="), source.index("for r4"))
+        self.assertEqual(source.count("{Particles = {}}"), 1)
 
     def test_decompile_no_debug_loop_mutated_table_materializes_fallback_local(self):
         chunk = parse_chunk(make_numeric_loop_mutated_table_without_debug_locals_chunk())
@@ -8392,6 +8883,9 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(_binary_expr("0.1", "<", speed), "0.1 < (if captured8 then captured14(r4, p2) else p2.Magnitude)")
         self.assertEqual(_call_expr(callback, []), "(if ready then handler else fallback)()")
 
+    def test_namecall_helper_groups_string_literal_receiver(self):
+        self.assertEqual(_namecall_expr('"value"', "format", []), '("value"):format()')
+
     def test_decompile_elseif_chain(self):
         chunk = parse_chunk(make_elseif_chain_chunk())
 
@@ -8660,7 +9154,7 @@ class ChunkTests(unittest.TestCase):
 
         source = decompile_chunk(chunk)
 
-        self.assertIn("local r2 = p0\nif not p0 then\n    r2 = {}\nend\nprint(r2)", source)
+        self.assertIn("local r2 = p0\nif not r2 then\n    r2 = {}\nend\nprint(r2)", source)
         self.assertNotIn("\nif not p0 then\nend", source)
 
     def test_decompile_branch_assignment_captured_by_closure(self):
@@ -9325,6 +9819,59 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("local r1 = compute()\nprint(r1, r1)", source)
         self.assertEqual(source.count("compute()"), 1)
+
+    def test_decompile_delayed_single_call_result_preserves_snapshot(self):
+        chunk = parse_chunk(make_delayed_single_call_result_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0 = clock()\nwait()\nreturn clock() - r0", source)
+        self.assertNotIn("clock() - clock()", source)
+
+    def test_decompile_reused_binary_result_materializes_once(self):
+        chunk = parse_chunk(make_reused_binary_result_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r2 = p0 - p1\nprint(r2, r2)", source)
+        self.assertEqual(source.count("p0 - p1"), 1)
+
+    def test_decompile_property_read_before_loop_preserves_snapshot(self):
+        chunk = parse_chunk(make_loop_property_snapshot_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local Position = workspace.CurrentCamera.Position", source)
+        self.assertIn("print(Position)", source)
+        self.assertEqual(source.count("workspace.CurrentCamera.Position"), 1)
+
+    def test_decompile_branch_condition_uses_materialized_register(self):
+        chunk = parse_chunk(make_branch_condition_reused_register_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn('local r1 = p0:IsA("Texture")\nif not r1 then', source)
+        self.assertIn("r1 = p0.Parent", source)
+        self.assertIn("print(r1)", source)
+        self.assertNotIn("local Parent", source)
+        self.assertEqual(source.count('p0:IsA("Texture")'), 1)
+
+    def test_decompile_short_circuit_guard_keeps_each_indexed_value(self):
+        chunk = parse_chunk(make_short_circuit_indexed_guard_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("if p0 and p1[p0] and p1[p0].Particles[p0] then", source)
+        self.assertNotIn("p1[p0].Particles and p1[p0].Particles", source)
+
+    def test_decompile_child_parameter_avoids_captured_upvalue_name(self):
+        chunk = parse_chunk(make_child_parameter_capture_collision_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("function(p0_2)", source)
+        self.assertIn("return p0[p0_2]", source)
+        self.assertNotIn("return p0[p0]", source)
 
     def test_decompile_expression_callee_call_uses_grouped_target(self):
         chunk = parse_chunk(make_expression_callee_call_chunk())

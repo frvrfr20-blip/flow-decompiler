@@ -3237,6 +3237,49 @@ def make_short_circuit_or_if_chunk():
     return bytes(out)
 
 
+def make_short_circuit_or_branch_liveout_chunk():
+    strings = ["initial", "changed", "print"]
+    words = [
+        encode_ad("LOADK", 2, 0),
+        encode_ad("JUMPIF", 0, 1),
+        encode_ad("JUMPIFNOT", 1, 1),
+        encode_ad("LOADK", 2, 1),
+        encode_ad("GETIMPORT", 3, 3),
+        import_id(2),
+        encode_abc("MOVE", 4, 2, 0),
+        encode_abc("CALL", 3, 2, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(4)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out.append(3)
+    out += varint(3)
+    out.append(4)
+    out += struct.pack("<I", import_id(2))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_three_term_short_circuit_or_if_chunk():
     strings = ["print", "hit"]
     words = [
@@ -4958,6 +5001,73 @@ def make_while_call_chunk():
     return bytes(out)
 
 
+def make_while_stripped_loop_carried_value_chunk():
+    words = [
+        encode_ad("LOADN", 0, 1),
+        encode_ad("LOADN", 1, 3),
+        encode_ad("LOADN", 2, 1),
+        encode_ad("JUMPIFNOTLT", 0, 3),
+        1,
+        encode_abc("ADD", 0, 0, 2),
+        encode_ad("JUMPBACK", 0, -4),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_while_condition_setup_uses_loop_carried_value_chunk():
+    words = [
+        encode_ad("LOADN", 1, 1),
+        encode_ad("LOADN", 4, 1),
+        encode_abc("GETTABLE", 2, 0, 1),
+        encode_ad("LOADN", 3, 10),
+        encode_ad("JUMPIFNOTLT", 2, 3),
+        3,
+        encode_abc("ADD", 1, 1, 4),
+        encode_ad("JUMPBACK", 0, -6),
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_while_compound_guard_chunk():
     strings = ["tick", "a", "b"]
     words = [
@@ -5291,6 +5401,48 @@ def make_repeat_call_chunk():
     out += varint(0)
     out.append(0)
     out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_repeat_forward_exit_call_chunk():
+    strings = ["tick", "flag"]
+    words = [
+        encode_ad("GETIMPORT", 1, 1),
+        import_id(0),
+        encode_abc("CALL", 1, 1, 1),
+        encode_ad("JUMPIF", 0, 1),
+        encode_ad("JUMPBACK", 0, -5),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([2, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(1)
+    out += varint(2)
+    out += varint(0)
+    out += varint(6)
+    out.append(0)
+    out += varint(0)
     out += varint(0)
     return bytes(out)
 
@@ -6195,6 +6347,162 @@ def make_stripped_val_and_ref_capture_identity_chunk():
     return bytes(out)
 
 
+def make_stripped_ref_and_val_capture_identity_chunk():
+    main_words = [
+        encode_ad("LOADN", 0, 0),
+        encode_ad("NEWCLOSURE", 1, 0),
+        encode_abc("CAPTURE", 1, 0, 0),
+        encode_ad("NEWCLOSURE", 2, 1),
+        encode_abc("CAPTURE", 0, 0, 0),
+        encode_ad("LOADN", 0, 1),
+        encode_abc("RETURN", 1, 3, 0),
+    ]
+    child_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(3)
+
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(2)
+    out += varint(1)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    for _ in range(2):
+        out += bytes([1, 0, 1, 0, 0])
+        out += varint(0)
+        out += varint(len(child_words))
+        for word in child_words:
+            out += struct.pack("<I", word)
+        out += varint(0)
+        out += varint(0)
+        out += varint(0)
+        out += varint(0)
+        out.append(0)
+        out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
+def make_stripped_shared_val_capture_identity_chunk():
+    main_words = [
+        encode_abc("NEWTABLE", 0, 0, 0),
+        0,
+        encode_ad("NEWCLOSURE", 1, 0),
+        encode_abc("CAPTURE", 0, 0, 0),
+        encode_ad("NEWCLOSURE", 2, 1),
+        encode_abc("CAPTURE", 0, 0, 0),
+        encode_abc("RETURN", 1, 3, 0),
+    ]
+    child_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(3)
+
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(2)
+    out += varint(1)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    for _ in range(2):
+        out += bytes([1, 0, 1, 0, 0])
+        out += varint(0)
+        out += varint(len(child_words))
+        for word in child_words:
+            out += struct.pack("<I", word)
+        out += varint(0)
+        out += varint(0)
+        out += varint(0)
+        out += varint(0)
+        out.append(0)
+        out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
+def make_nested_generated_capture_name_collision_chunk():
+    main_words = [
+        encode_ad("LOADN", 0, 1),
+        encode_ad("NEWCLOSURE", 1, 0),
+        encode_abc("CAPTURE", 0, 0, 0),
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+    child_words = [
+        encode_ad("LOADN", 0, 0),
+        encode_ad("NEWCLOSURE", 1, 0),
+        encode_abc("CAPTURE", 0, 0, 0),
+        encode_abc("GETUPVAL", 2, 0, 0),
+        encode_abc("RETURN", 1, 3, 0),
+    ]
+    nested_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(3)
+
+    protos = [
+        (bytes([2, 0, 0, 0, 0]), main_words, [1]),
+        (bytes([3, 0, 1, 0, 0]), child_words, [2]),
+        (bytes([1, 0, 1, 0, 0]), nested_words, []),
+    ]
+    for header, words, children in protos:
+        out += header
+        out += varint(0)
+        out += varint(len(words))
+        for word in words:
+            out += struct.pack("<I", word)
+        out += varint(0)
+        out += varint(len(children))
+        for child_id in children:
+            out += varint(child_id)
+        out += varint(0)
+        out += varint(0)
+        out.append(0)
+        out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
 def make_setupvalue_chunk():
     strings = ["ready", "state"]
     words = [
@@ -6225,6 +6533,39 @@ def make_setupvalue_chunk():
     out += varint(0)
     out += varint(1)
     out += varint(2)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_setupvalue_preserves_loaded_snapshot_chunk():
+    strings = ["state"]
+    words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_ad("LOADN", 1, 0),
+        encode_abc("SETUPVAL", 1, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([2, 0, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
     out += varint(0)
     return bytes(out)
 
@@ -6278,6 +6619,59 @@ def make_named_local_function_call_chunk():
     out += varint(0)
     out += varint(0)
     out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
+def make_child_debugname_reused_function_chunk():
+    strings = ["helper", "ok"]
+    main_words = [
+        encode_ad("NEWCLOSURE", 0, 0),
+        encode_abc("MOVE", 1, 0, 0),
+        encode_abc("CALL", 1, 1, 1),
+        encode_abc("MOVE", 1, 0, 0),
+        encode_abc("CALL", 1, 1, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+    child_words = [
+        encode_ad("LOADK", 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([2, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out += varint(1)
     out.append(0)
     out.append(0)
 
@@ -6457,6 +6851,48 @@ def make_reused_call_result_chunk():
     out.append(0)
     out += varint(1)
     out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out.append(4)
+    out += struct.pack("<I", import_id(1))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_reused_call_result_through_move_chunk():
+    strings = ["compute", "print"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("CALL", 0, 1, 2),
+        encode_abc("MOVE", 1, 0, 0),
+        encode_ad("GETIMPORT", 2, 2),
+        import_id(1),
+        encode_abc("MOVE", 3, 1, 0),
+        encode_abc("MOVE", 4, 1, 0),
+        encode_abc("CALL", 2, 3, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([5, 0, 0, 0, 0])
     out += varint(0)
     out += varint(len(words))
     for word in words:
@@ -8286,6 +8722,21 @@ class ChunkTests(unittest.TestCase):
         )
         self.assertNotIn("JUMPXEQKS", source)
 
+    def test_decompile_short_circuit_or_preserves_branch_liveout(self):
+        chunk = parse_chunk(make_short_circuit_or_branch_liveout_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'local r2 = "initial"\n'
+            "if p0 or p1 then\n"
+            '    r2 = "changed"\n'
+            "end\n"
+            "print(r2)",
+            source,
+        )
+        self.assertNotIn("if p0 or p1 then\nend", source)
+
     def test_decompile_constant_comparison_exits_bounded_branch(self):
         chunk = parse_chunk(make_constant_comparison_exits_bounded_branch_chunk())
 
@@ -8382,6 +8833,36 @@ class ChunkTests(unittest.TestCase):
         self.assertNotIn("JUMPIFNOT", source)
         self.assertNotIn("JUMPBACK", source)
 
+    def test_decompile_while_preserves_stripped_loop_carried_value(self):
+        chunk = parse_chunk(make_while_stripped_loop_carried_value_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local r0 = 1\n"
+            "while r0 < 3 do\n"
+            "    r0 = r0 + 1\n"
+            "end\n"
+            "return r0",
+            source,
+        )
+        self.assertNotIn("while 1 < 3 do\nend", source)
+
+    def test_decompile_while_rebuilds_condition_setup_with_loop_carried_value(self):
+        chunk = parse_chunk(make_while_condition_setup_uses_loop_carried_value_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local r1 = 1\n"
+            "while p0[r1] < 10 do\n"
+            "    r1 = r1 + 1\n"
+            "end\n"
+            "return r1",
+            source,
+        )
+        self.assertNotIn("while p0[1] < 10", source)
+
     def test_decompile_while_compound_guard(self):
         chunk = parse_chunk(make_while_compound_guard_chunk())
 
@@ -8450,6 +8931,15 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn('repeat\n    print("tick")\nuntil false', source)
         self.assertNotIn("JUMPIFNOT", source)
+
+    def test_decompile_repeat_until_forward_exit_guard(self):
+        chunk = parse_chunk(make_repeat_forward_exit_call_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("repeat\n    tick()\nuntil flag", source)
+        self.assertNotIn("while not flag do", source)
+        self.assertNotIn("JUMPBACK", source)
 
     def test_decompile_repeat_until_and_condition(self):
         chunk = parse_chunk(make_repeat_and_condition_chunk())
@@ -8682,12 +9172,75 @@ class ChunkTests(unittest.TestCase):
         self.assertNotIn("CAPTURE", source)
         self.assertNotIn("GETUPVAL", source)
 
+    def test_decompile_stripped_ref_then_val_captures_keep_separate_identity(self):
+        chunk = parse_chunk(make_stripped_ref_and_val_capture_identity_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local captured0 = 0\n"
+            "local captured1 = captured0\n"
+            "captured0 = 1\n"
+            "return function()\n"
+            "    return captured0\n"
+            "end, function()\n"
+            "    return captured1\n"
+            "end",
+            source,
+        )
+        self.assertNotIn("CAPTURE", source)
+        self.assertNotIn("GETUPVAL", source)
+
+    def test_decompile_stripped_sibling_value_captures_share_identity(self):
+        chunk = parse_chunk(make_stripped_shared_val_capture_identity_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local captured0 = {}\n"
+            "return function()\n"
+            "    return captured0\n"
+            "end, function()\n"
+            "    return captured0\n"
+            "end",
+            source,
+        )
+        self.assertNotIn("captured1", source)
+        self.assertNotIn("CAPTURE", source)
+        self.assertNotIn("GETUPVAL", source)
+
+    def test_decompile_generated_capture_name_avoids_inherited_upvalue(self):
+        chunk = parse_chunk(make_nested_generated_capture_name_collision_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            "local captured0 = 1\n"
+            "return function()\n"
+            "    local captured1 = 0\n"
+            "    return function()\n"
+            "        return captured1\n"
+            "    end, captured0\n"
+            "end",
+            source,
+        )
+        self.assertNotIn("local captured0 = 0", source)
+
     def test_decompile_setupvalue_uses_debug_upvalue_name(self):
         chunk = parse_chunk(make_setupvalue_chunk())
 
         source = decompile_chunk(chunk)
 
         self.assertIn('state = "ready"', source)
+        self.assertNotIn("SETUPVAL", source)
+
+    def test_decompile_setupvalue_preserves_loaded_upvalue_snapshot(self):
+        chunk = parse_chunk(make_setupvalue_preserves_loaded_snapshot_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0 = state\nstate = 0\nreturn r0", source)
+        self.assertNotIn("state = 0\nreturn state", source)
         self.assertNotIn("SETUPVAL", source)
 
     def test_decompile_named_local_function_call(self):
@@ -8697,6 +9250,21 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn('local function helper()\n    return "ok"\nend\nhelper()', source)
         self.assertNotIn("function()\nend()", source)
+
+    def test_decompile_reused_child_debugname_preserves_closure_identity(self):
+        chunk = parse_chunk(make_child_debugname_reused_function_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn(
+            'local function helper()\n'
+            '    return "ok"\n'
+            "end\n"
+            "helper()\n"
+            "helper()",
+            source,
+        )
+        self.assertEqual(source.count('return "ok"'), 1)
 
     def test_decompile_immediate_closure_call_uses_parenthesized_iife(self):
         chunk = parse_chunk(make_immediate_closure_call_chunk())
@@ -8748,6 +9316,14 @@ class ChunkTests(unittest.TestCase):
             "return r0",
             source,
         )
+        self.assertEqual(source.count("compute()"), 1)
+
+    def test_decompile_reused_moved_call_result_materializes_alias(self):
+        chunk = parse_chunk(make_reused_call_result_through_move_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r1 = compute()\nprint(r1, r1)", source)
         self.assertEqual(source.count("compute()"), 1)
 
     def test_decompile_expression_callee_call_uses_grouped_target(self):

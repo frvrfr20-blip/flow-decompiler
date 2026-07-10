@@ -552,6 +552,7 @@ def decompile_proto(
     pending_namecalls: dict[int, tuple[str, str]] = {}
     pending_iterator_calls: dict[int, str] = {}
     mutable_capture_locals: dict[int, str] = {}
+    value_capture_locals: dict[int, tuple[str, str]] = {}
     next_capture_local = 0
     open_results: tuple[int, list[str]] | None = None
     declared_locals: set[tuple[int, str, int, int]] = set()
@@ -600,6 +601,7 @@ def decompile_proto(
 
     def set_reg(reg_id: int, value: str) -> None:
         nonlocal open_results
+        value_capture_locals.pop(reg_id, None)
         regs[reg_id] = value
         table_literals.pop(reg_id, None)
         pending_table_locals.pop(reg_id, None)
@@ -704,20 +706,54 @@ def decompile_proto(
             set_reg(reg_id + offset, local_name)
         return True
 
+    def allocate_capture_local_name() -> str:
+        nonlocal next_capture_local
+        used_names = set(inferred_locals)
+        used_names.update(reserved_local_names)
+        used_names.update(name for _, name, _, _ in declared_locals)
+        used_names.update(value for value in regs.values() if _is_identifier(value))
+        used_names.update(mutable_capture_locals.values())
+        used_names.update(name for _, name in value_capture_locals.values())
+        used_names.update(
+            _upvalue_name(proto, index, upvalue_names)
+            for index in range(proto.numupvalues)
+        )
+
+        while True:
+            name = f"captured{next_capture_local}"
+            next_capture_local += 1
+            if name not in used_names:
+                return name
+
     def capture_source_name(capture, indent: int | None = None, upvalue_index: int | None = None) -> str | None:
         nonlocal next_capture_local
         if capture.a in {0, 1}:
             local_name = _debug_local_name(proto, capture.b, capture.pc)
             value = local_name or reg(capture.b)
+            if capture.a == 0 and capture.b in mutable_capture_locals:
+                cached = value_capture_locals.get(capture.b)
+                if cached is not None and cached[0] == value:
+                    return cached[1]
+                if indent is not None and upvalue_index is not None:
+                    name = allocate_capture_local_name()
+                    emit_line(indent, f"local {name} = {value}")
+                    value_capture_locals[capture.b] = (value, name)
+                    return name
+                return None
             if _is_identifier(value):
                 return value
+            if capture.a == 0:
+                cached = value_capture_locals.get(capture.b)
+                if cached is not None and cached[0] == value:
+                    return cached[1]
             if indent is not None and upvalue_index is not None:
-                name = f"captured{next_capture_local}"
-                next_capture_local += 1
+                name = allocate_capture_local_name()
                 emit_line(indent, f"local {name} = {value}")
                 if capture.a == 1:
                     mutable_capture_locals[capture.b] = name
                     set_reg(capture.b, name)
+                else:
+                    value_capture_locals[capture.b] = (value, name)
                 return name
             return None
         if capture.a == 2:
@@ -748,8 +784,20 @@ def decompile_proto(
             scan_index += 1
         return names
 
+    def closure_captures_register(closure_index: int, reg_id: int) -> bool:
+        scan_index = closure_index + 1
+        while scan_index < len(instructions):
+            capture = instructions[scan_index]
+            if capture.op.name != "CAPTURE":
+                break
+            if capture.a in {0, 1} and capture.b == reg_id:
+                return True
+            scan_index += 1
+        return False
+
     def set_table_reg(reg_id: int, table: TableLiteral, pc: int, indent: int) -> None:
         nonlocal open_results
+        value_capture_locals.pop(reg_id, None)
         mutable_name = mutable_capture_locals.get(reg_id)
         if mutable_name is not None:
             rendered = table.render()
@@ -778,6 +826,7 @@ def decompile_proto(
         table = table_literals.get(source)
         if table is None:
             return False
+        value_capture_locals.pop(target, None)
 
         if source in pending_table_locals:
             if indent is None:
@@ -1061,6 +1110,7 @@ def decompile_proto(
             dict[int, tuple[str, tuple[int, str, int, int]]],
             dict[int, str],
             dict[int, str],
+            dict[int, tuple[str, str]],
             tuple[int, list[str]] | None,
         ]:
             return (
@@ -1069,6 +1119,7 @@ def decompile_proto(
                 dict(pending_table_locals),
                 dict(pending_iterator_calls),
                 dict(mutable_capture_locals),
+                dict(value_capture_locals),
                 open_results,
             )
 
@@ -1079,16 +1130,18 @@ def decompile_proto(
                 dict[int, tuple[str, tuple[int, str, int, int]]],
                 dict[int, str],
                 dict[int, str],
+                dict[int, tuple[str, str]],
                 tuple[int, list[str]] | None,
             ],
         ) -> None:
-            nonlocal mutable_capture_locals, open_results, pending_iterator_calls, pending_table_locals, regs, table_literals
+            nonlocal mutable_capture_locals, open_results, pending_iterator_calls, pending_table_locals, regs, table_literals, value_capture_locals
             (
                 regs,
                 table_literals,
                 pending_table_locals,
                 pending_iterator_calls,
                 mutable_capture_locals,
+                value_capture_locals,
                 open_results,
             ) = saved
 
@@ -1110,6 +1163,14 @@ def decompile_proto(
                         set_reg(setup.a, reg(setup.b))
                 elif setup.op.name == "GETUPVAL":
                     set_reg(setup.a, _upvalue_name(proto, setup.b, upvalue_names))
+                elif setup.op.name in {"GETTABLEKS", "GETUDATAKS"} and setup.aux is not None:
+                    key_index = _aux_key_index(setup.op.name, setup.aux)
+                    key = proto.constant_text(key_index) or f"K{key_index}"
+                    set_reg(setup.a, _field_expr(reg(setup.b), key))
+                elif setup.op.name == "GETTABLE":
+                    set_reg(setup.a, _index_expr(reg(setup.b), reg(setup.c)))
+                elif setup.op.name == "GETTABLEN":
+                    set_reg(setup.a, f"{reg(setup.b)}[{setup.c + 1}]")
                 else:
                     return index
                 index += 1
@@ -1474,6 +1535,11 @@ def decompile_proto(
             used_names = set(inferred_locals)
             used_names.update(reserved_local_names)
             used_names.update(name for _, name, _, _ in declared_locals)
+            used_names.update(value for value in regs.values() if _is_identifier(value))
+            used_names.update(
+                _upvalue_name(proto, index, upvalue_names)
+                for index in range(proto.numupvalues)
+            )
             if local_name not in used_names:
                 return local_name
 
@@ -1573,6 +1639,37 @@ def decompile_proto(
                 if instruction_writes_register(candidate, reg_id):
                     break
             return count
+
+        def materialize_upvalue_snapshots(
+            instruction_index: int,
+            upvalue_index: int,
+            source_reg: int,
+            indent: int,
+        ) -> None:
+            upvalue_name = _upvalue_name(proto, upvalue_index, upvalue_names)
+            for reg_id, value in list(regs.items()):
+                if (
+                    reg_id == source_reg
+                    or value != upvalue_name
+                    or future_register_read_count(instruction_index + 1, reg_id) == 0
+                ):
+                    continue
+
+                debug_name = _debug_local_name(proto, reg_id, instructions[instruction_index].pc)
+                if debug_name is not None:
+                    key = local_key(reg_id, debug_name, instructions[instruction_index].pc)
+                    if key in declared_locals:
+                        emit_line(indent, f"{debug_name} = {upvalue_name}")
+                    else:
+                        emit_line(indent, f"local {debug_name} = {upvalue_name}")
+                        declared_locals.add(key)
+                    set_reg(reg_id, debug_name)
+                    continue
+
+                local_name = unique_inferred_local_name(f"r{reg_id}")
+                emit_line(indent, f"local {local_name} = {upvalue_name}")
+                inferred_locals.add(local_name)
+                set_reg(reg_id, local_name)
 
         def previous_register_write_count(stop_index: int, reg_id: int) -> int:
             return sum(
@@ -2777,7 +2874,6 @@ def decompile_proto(
                             restore_state(saved)
                             return or_end_index
 
-                    branch_saved = snapshot_state()
                     or_branch_stop_pc = or_end_pc
                     or_else_index = None
                     or_final_end_pc = or_end_pc
@@ -2798,6 +2894,13 @@ def decompile_proto(
                             or_final_end_pc = maybe_then_end_pc
                             or_final_end_index = maybe_then_end_index
 
+                    restore_state(saved)
+                    ranges = [(or_body_index, or_branch_stop_pc)]
+                    if or_else_index is not None:
+                        ranges.append((or_else_index, or_final_end_pc))
+                    materialize_branch_liveout_registers(ranges, or_final_end_index, indent)
+                    saved = snapshot_state()
+                    branch_saved = snapshot_state()
                     open_results = None
                     emit_line(indent, f"if {or_condition} then")
                     emit_range(or_body_index, or_branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc, or_final_end_pc)
@@ -3069,6 +3172,48 @@ def decompile_proto(
                         open_results = None
                         index = target_index
                         continue
+
+            repeat_exit_guard_index = None
+            repeat_backedge_index = None
+            scan_index = index + 1
+            while scan_index < len(instructions):
+                candidate = instructions[scan_index]
+                if stop_pc is not None and candidate.pc >= stop_pc:
+                    break
+                if candidate.op.name == "JUMPBACK" and candidate.jump_target == insn.pc and scan_index > index:
+                    guard_index = scan_index - 1
+                    guard = instructions[guard_index]
+                    enclosed_by_forward_guard = any(
+                        prior.op.name in _CONDITIONAL_JUMP_OPS
+                        and prior.jump_target is not None
+                        and prior.next_pc <= candidate.pc < prior.jump_target
+                        and prior.jump_target > candidate.next_pc
+                        for prior in instructions[index:guard_index]
+                    )
+                    if (
+                        guard.op.name in _CONDITIONAL_JUMP_OPS
+                        and guard.next_pc == candidate.pc
+                        and guard.jump_target == candidate.next_pc
+                        and jump_taken_condition(guard) is not None
+                        and not enclosed_by_forward_guard
+                    ):
+                        repeat_exit_guard_index = guard_index
+                        repeat_backedge_index = scan_index
+                        break
+                scan_index += 1
+
+            if repeat_exit_guard_index is not None and repeat_backedge_index is not None:
+                repeat_guard = instructions[repeat_exit_guard_index]
+                repeat_backedge = instructions[repeat_backedge_index]
+                saved = snapshot_state()
+                open_results = None
+                emit_line(indent, "repeat")
+                emit_range(index, repeat_guard.pc, indent + 1, repeat_guard.pc, repeat_backedge.next_pc)
+                condition = jump_taken_condition(repeat_guard) or reg(repeat_guard.a)
+                emit_line(indent, f"until {condition}")
+                restore_state(saved)
+                index = pc_to_index.get(repeat_backedge.next_pc, repeat_backedge_index + 1)
+                continue
 
             repeat_jump_index = None
             scan_index = index + 1
@@ -3369,13 +3514,23 @@ def decompile_proto(
                                 and backedge_target <= loop_continue_pc
                             )
                         ):
+                            loop_ranges = [(loop_body_index, maybe_backedge.pc)]
+                            materialize_table_writes(loop_ranges, indent)
+                            materialize_branch_liveout_registers(
+                                loop_ranges,
+                                pc_to_index.get(backedge_target),
+                                indent,
+                            )
+                            condition_start_index = pc_to_index.get(backedge_target)
+                            if condition_start_index is not None and backedge_target < insn.pc:
+                                apply_condition_setup(condition_start_index, insn.pc)
                             saved_regs = dict(regs)
                             saved_tables = clone_tables()
                             open_results = None
                             loop_condition = (
                                 condition_chain_source(loop_conditions, "and")
                                 if len(loop_conditions) > 1
-                                else condition
+                                else (jump_fallthrough_condition(insn) or condition)
                             )
                             emit_line(indent, f"while {loop_condition} do")
                             emit_range(loop_body_index, maybe_backedge.pc, indent + 1, backedge_target, target)
@@ -3495,27 +3650,51 @@ def decompile_proto(
                 set_reg_or_declare_local(insn.a, "nil", insn.next_pc, indent)
             elif name == "MOVE":
                 if not alias_table_reg(insn.a, insn.b, insn.next_pc, indent):
-                    set_reg_or_declare_local(insn.a, reg(insn.b), insn.next_pc, indent)
+                    value = reg(insn.b)
+                    debug_name = _debug_local_name(proto, insn.a, insn.next_pc)
+                    repeated_expression = value.startswith("function(") or value.rstrip().endswith(")")
+                    if (
+                        debug_name is None
+                        and repeated_expression
+                        and future_register_read_count(index + 1, insn.a) > 1
+                    ):
+                        declare_inferred_local(insn.a, f"r{insn.a}", value, indent)
+                    else:
+                        set_reg_or_declare_local(insn.a, value, insn.next_pc, indent)
             elif name == "GETUPVAL":
                 set_reg_or_declare_local(insn.a, _upvalue_name(proto, insn.b, upvalue_names), insn.next_pc, indent)
             elif name == "SETUPVAL":
                 open_results = None
+                materialize_upvalue_snapshots(index, insn.b, insn.a, indent)
                 emit_line(indent, f"{_upvalue_name(proto, insn.b, upvalue_names)} = {reg(insn.a)}")
             elif name == "NEWCLOSURE":
                 child = _child_proto(proto, insn.d, protos)
                 if child is not None:
-                    child_upvalue_names = closure_upvalue_names(index, child, indent)
                     local_name = _debug_local_name(proto, insn.a, insn.next_pc)
+                    inferred_name = None
+                    if (
+                        local_name is None
+                        and child.debugname is not None
+                        and _is_identifier(child.debugname)
+                        and future_register_read_count(index + 1, insn.a) > 1
+                        and not closure_captures_register(index, insn.a)
+                    ):
+                        inferred_name = unique_inferred_local_name(child.debugname)
+                        local_name = inferred_name
+                    child_upvalue_names = closure_upvalue_names(index, child, indent)
                     if local_name is not None:
-                        key = local_key(insn.a, local_name, insn.next_pc)
+                        key = local_key(insn.a, local_name, insn.next_pc) if inferred_name is None else None
                         emit_local_function(
                             indent,
                             local_name,
                             child,
                             child_upvalue_names,
-                            declare_local=key not in declared_locals,
+                            declare_local=inferred_name is not None or key not in declared_locals,
                         )
-                        declared_locals.add(key)
+                        if inferred_name is not None:
+                            inferred_locals.add(inferred_name)
+                        elif key is not None:
+                            declared_locals.add(key)
                         set_reg(insn.a, local_name)
                     else:
                         set_reg(insn.a, _function_expr(child, protos, child_upvalue_names))
@@ -3525,18 +3704,31 @@ def decompile_proto(
             elif name == "DUPCLOSURE":
                 child = _closure_constant_proto(proto, insn.d, protos)
                 if child is not None:
-                    child_upvalue_names = closure_upvalue_names(index, child, indent)
                     local_name = _debug_local_name(proto, insn.a, insn.next_pc)
+                    inferred_name = None
+                    if (
+                        local_name is None
+                        and child.debugname is not None
+                        and _is_identifier(child.debugname)
+                        and future_register_read_count(index + 1, insn.a) > 1
+                        and not closure_captures_register(index, insn.a)
+                    ):
+                        inferred_name = unique_inferred_local_name(child.debugname)
+                        local_name = inferred_name
+                    child_upvalue_names = closure_upvalue_names(index, child, indent)
                     if local_name is not None:
-                        key = local_key(insn.a, local_name, insn.next_pc)
+                        key = local_key(insn.a, local_name, insn.next_pc) if inferred_name is None else None
                         emit_local_function(
                             indent,
                             local_name,
                             child,
                             child_upvalue_names,
-                            declare_local=key not in declared_locals,
+                            declare_local=inferred_name is not None or key not in declared_locals,
                         )
-                        declared_locals.add(key)
+                        if inferred_name is not None:
+                            inferred_locals.add(inferred_name)
+                        elif key is not None:
+                            declared_locals.add(key)
                         set_reg(insn.a, local_name)
                     else:
                         set_reg(insn.a, _function_expr(child, protos, child_upvalue_names))

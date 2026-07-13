@@ -138,7 +138,10 @@ _ROBLOX_SERVICE_NAMES = {
 
 
 def _quote_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    source = json.dumps(value, ensure_ascii=False)
+    for codepoint in range(0x20):
+        source = source.replace(f"\\u{codepoint:04x}", f"\\x{codepoint:02x}")
+    return source
 
 
 def _unquote_string_literal(value: str) -> str | None:

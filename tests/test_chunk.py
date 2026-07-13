@@ -12,6 +12,7 @@ from luau_decompiler.decompile import (
     _is_loop_continue_target,
     _namecall_expr,
     _needs_statement_separator,
+    _quote_string,
     decompile_chunk,
 )
 from luau_decompiler.disasm import encode_abc, encode_ad, encode_e
@@ -10168,6 +10169,9 @@ class ChunkTests(unittest.TestCase):
 
     def test_vararg_receiver_is_grouped_for_index(self):
         self.assertEqual(_index_expr("...", "..."), "(...)[...]")
+
+    def test_control_bytes_use_luau_hex_escapes(self):
+        self.assertEqual(_quote_string("\x15\x00"), '"\\x15\\x00"')
 
     def test_live_roblox_encoded_opcode_chunk_is_preserved(self):
         raw = base64.b64decode("CQMAAAEAAAABAgACowAAAIIAAQAAAAEAARgAAAEAAAAAAA==")

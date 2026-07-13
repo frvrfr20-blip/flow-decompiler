@@ -740,6 +740,7 @@ class FlowDecompilerApp:
         self.status.set("Copied")
 
     def _clear(self) -> None:
+        self.render_token += 1
         self.updating_output = True
         self.output.delete("1.0", "end")
         self.output.edit_modified(False)
@@ -748,7 +749,7 @@ class FlowDecompilerApp:
         self.input_text = ""
         self.output_is_result = False
         self.file_label.set("No file selected")
-        self.status.set("Cleared")
+        self._set_busy(False, "Cleared")
 
 
 def _build_parser() -> argparse.ArgumentParser:

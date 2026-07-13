@@ -8989,6 +8989,7 @@ class ChunkTests(unittest.TestCase):
             if analysis_calls > 10_000:
                 raise AnalysisBudgetExceeded
 
+        previous_profile = sys.getprofile()
         sys.setprofile(count_analysis_calls)
         try:
             try:
@@ -8996,7 +8997,7 @@ class ChunkTests(unittest.TestCase):
             except AnalysisBudgetExceeded:
                 self.fail("termination analysis exceeded its deterministic work budget")
         finally:
-            sys.setprofile(None)
+            sys.setprofile(previous_profile)
 
         self.assertLess(analysis_calls, 1_000)
         self.assertIn("return", source)

@@ -101,6 +101,58 @@ class UiInputStateTests(unittest.TestCase):
         self.assertTrue(app.output_is_result)
         self.assertEqual(busy_states, [(False, "large.b64 -> decompile")])
 
+    def test_clear_cancels_pending_output_chunks(self):
+        class Value:
+            def __init__(self):
+                self.value = None
+
+            def set(self, value):
+                self.value = value
+
+        class Root:
+            def __init__(self):
+                self.callbacks = []
+
+            def after_idle(self, callback):
+                self.callbacks.append(callback)
+
+        class Output:
+            def __init__(self):
+                self.parts = []
+
+            def insert(self, _index, value):
+                self.parts.append(value)
+
+            def delete(self, _start, _end):
+                self.parts.clear()
+
+            def edit_modified(self, _value):
+                return None
+
+        app = FlowDecompilerApp.__new__(FlowDecompilerApp)
+        app.root = Root()
+        app.output = Output()
+        app.file_label = Value()
+        app.status = Value()
+        app.render_token = 7
+        app.updating_output = True
+        app.output_is_result = True
+        app.path = Path("large.b64")
+        app.input_text = ""
+        app._set_busy = lambda _busy, status: app.status.set(status)
+        text = "x" * (OUTPUT_INSERT_CHUNK_SIZE + 17)
+
+        app._insert_output_chunk(7, text, 0, "large.b64", "decompile")
+        app._clear()
+        while app.root.callbacks:
+            app.root.callbacks.pop(0)()
+
+        self.assertEqual(app.output.parts, [])
+        self.assertEqual(app.render_token, 8)
+        self.assertFalse(app.output_is_result)
+        self.assertEqual(app.file_label.value, "No file selected")
+        self.assertEqual(app.status.value, "Cleared")
+
 
 if __name__ == "__main__":
     unittest.main()

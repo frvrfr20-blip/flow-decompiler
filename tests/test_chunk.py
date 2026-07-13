@@ -2,6 +2,7 @@ import struct
 import sys
 import unittest
 import base64
+import re
 
 from luau_decompiler.chunk import parse_chunk
 from luau_decompiler.decompile import (
@@ -6072,7 +6073,7 @@ def make_numeric_for_inferred_local_shadow_chunk():
     return bytes(out)
 
 
-def make_generic_for_named_call_chunk():
+def make_generic_for_named_call_chunk(var_count=2):
     strings = ["next", "items", "print", "key", "value", "state"]
     words = [
         encode_ad("GETIMPORT", 0, 1),
@@ -6087,7 +6088,7 @@ def make_generic_for_named_call_chunk():
         encode_abc("MOVE", 7, 4, 0),
         encode_abc("CALL", 5, 3, 1),
         encode_ad("FORGLOOP", 0, -6),
-        2,
+        var_count,
         encode_abc("RETURN", 0, 1, 0),
     ]
 
@@ -6097,7 +6098,7 @@ def make_generic_for_named_call_chunk():
     out += string_table(strings)
     out.append(0)
     out += varint(1)
-    out += bytes([8, 0, 0, 0, 0])
+    out += bytes([max(8, var_count + 3), 0, 0, 0, 0])
     out += varint(0)
     out += varint(len(words))
     for word in words:
@@ -7223,6 +7224,427 @@ def make_reused_call_result_chunk():
     return bytes(out)
 
 
+def make_many_materialized_call_results_chunk(count=210):
+    strings = ["compute", "print"]
+    words = []
+    for _ in range(count):
+        words.extend(
+            [
+                encode_abc("GETGLOBAL", 0, 0, 0),
+                0,
+                encode_abc("CALL", 0, 1, 2),
+                encode_abc("GETGLOBAL", 1, 0, 0),
+                1,
+                encode_abc("MOVE", 2, 0, 0),
+                encode_abc("MOVE", 3, 0, 0),
+                encode_abc("CALL", 1, 3, 1),
+            ]
+        )
+    words.append(encode_abc("RETURN", 0, 1, 0))
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_many_materialized_tables_chunk(count=205):
+    strings = ["print"]
+    words = []
+    for _ in range(count):
+        words.extend(
+            [
+                encode_abc("NEWTABLE", 0, 0, 0),
+                0,
+                encode_ad("GETIMPORT", 1, 1),
+                import_id(0),
+                encode_abc("MOVE", 2, 0, 0),
+                encode_abc("CALL", 1, 2, 1),
+                encode_ad("GETIMPORT", 1, 1),
+                import_id(0),
+                encode_abc("MOVE", 2, 0, 0),
+                encode_abc("CALL", 1, 2, 1),
+            ]
+        )
+    words.append(encode_abc("RETURN", 0, 1, 0))
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_many_named_closures_chunk(count=205):
+    strings = ["helper"]
+    main_words = []
+    for _ in range(count):
+        main_words.extend(
+            [
+                encode_ad("NEWCLOSURE", 0, 0),
+                encode_abc("MOVE", 1, 0, 0),
+                encode_abc("CALL", 1, 1, 1),
+                encode_abc("MOVE", 1, 0, 0),
+                encode_abc("CALL", 1, 1, 1),
+            ]
+        )
+    main_words.append(encode_abc("RETURN", 0, 1, 0))
+    child_words = [
+        encode_ad("LOADN", 0, 1),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([2, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(1)
+    out.append(0)
+    out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
+def make_reassigned_spilled_debug_closure_chunk(prefix_count=128):
+    strings = [f"value{index}" for index in range(prefix_count)] + ["helper"]
+    main_words = [encode_ad("LOADN", 0, index) for index in range(prefix_count)]
+    main_words.extend(
+        [
+            encode_ad("NEWCLOSURE", 0, 0),
+            encode_ad("NEWCLOSURE", 0, 0),
+            encode_abc("RETURN", 0, 2, 0),
+        ]
+    )
+    child_words = [
+        encode_ad("LOADN", 0, 1),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([2, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(prefix_count + 1)
+    for index in range(prefix_count):
+        out += varint(index + 1)
+        out += varint(index + 1)
+        out += varint(index + 2)
+        out.append(0)
+    out += varint(prefix_count + 1)
+    out += varint(prefix_count + 1)
+    out += varint(prefix_count + 3)
+    out.append(0)
+    out += varint(0)
+
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
+def make_sequential_debug_locals_chunk(count=201):
+    strings = [f"value{index}" for index in range(count)]
+    words = [encode_ad("LOADN", 0, index) for index in range(count)]
+    words.append(encode_abc("RETURN", 0, 2, 0))
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(count)
+    for index in range(count):
+        out += varint(index + 1)
+        out += varint(index + 1)
+        out += varint(index + 2)
+        out.append(0)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_many_value_captures_chunk(count=210):
+    main_words = []
+    for value in range(count):
+        main_words.extend(
+            [
+                encode_ad("LOADN", 0, value),
+                encode_ad("NEWCLOSURE", 1, 0),
+                encode_abc("CAPTURE", 0, 0, 0),
+            ]
+        )
+    main_words.append(encode_abc("RETURN", 1, 2, 0))
+    child_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([2, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += bytes([1, 0, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
+def make_nested_spilled_capture_chunk(count=129, reserve_spill_names=False):
+    parent_words = []
+    child_words = []
+    for value in range(count):
+        parent_words.extend(
+            [
+                encode_ad("LOADN", 0, value),
+                encode_ad("NEWCLOSURE", 1, 0),
+                encode_abc("CAPTURE", 0, 0, 0),
+            ]
+        )
+        child_words.extend(
+            [
+                encode_ad("LOADN", 0, value),
+                encode_ad("NEWCLOSURE", 1, 0),
+                encode_abc("CAPTURE", 0, 0, 0),
+            ]
+        )
+    parent_words.append(encode_abc("RETURN", 1, 2, 0))
+    child_words.extend(
+        [
+            encode_abc("GETUPVAL", 0, 0, 0),
+            encode_abc("RETURN", 0, 2, 0),
+        ]
+    )
+    nested_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    spill_names = ["__flow_locals", "__flow_locals_p1"] if reserve_spill_names else []
+    out += string_table(spill_names)
+    out.append(0)
+    out += varint(3)
+
+    protos = [
+        (bytes([2, 0, 0, 0, 0]), parent_words, [1]),
+        (bytes([2, 0, 1, 0, 0]), child_words, [2]),
+        (bytes([1, 0, 1, 0, 0]), nested_words, []),
+    ]
+    for header, words, children in protos:
+        out += header
+        out += varint(0)
+        out += varint(len(words))
+        for word in words:
+            out += struct.pack("<I", word)
+        out += varint(len(spill_names))
+        for string_id in range(1, len(spill_names) + 1):
+            out.append(3)
+            out += varint(string_id)
+        out += varint(len(children))
+        for child_id in children:
+            out += varint(child_id)
+        out += varint(0)
+        out += varint(0)
+        out.append(0)
+        out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
+def make_spilled_debug_capture_chunk(prefix_count=128):
+    strings = [f"value{index}" for index in range(prefix_count)] + ["x"]
+    main_words = [encode_ad("LOADN", 0, index) for index in range(prefix_count)]
+    main_words.extend(
+        [
+            encode_ad("LOADN", 0, 999),
+            encode_ad("NEWCLOSURE", 1, 0),
+            encode_abc("CAPTURE", 1, 0, 0),
+            encode_abc("RETURN", 1, 2, 0),
+        ]
+    )
+    child_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([2, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(prefix_count + 1)
+    for index in range(prefix_count):
+        out += varint(index + 1)
+        out += varint(index + 1)
+        out += varint(index + 2)
+        out.append(0)
+    out += varint(prefix_count + 1)
+    out += varint(prefix_count + 1)
+    out += varint(prefix_count + 4)
+    out.append(0)
+    out += varint(0)
+
+    out += bytes([1, 0, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(0)
+    out += varint(1)
+    out += varint(prefix_count + 1)
+
+    out += varint(0)
+    return bytes(out)
+
+
 def make_reused_call_result_through_move_chunk():
     strings = ["compute", "print"]
     words = [
@@ -8163,6 +8585,92 @@ def make_anonymous_multi_return_call_chunk():
     return bytes(out)
 
 
+def make_wide_multi_return_call_chunk(result_count=201):
+    strings = ["provider"]
+    words = [
+        encode_ad("GETIMPORT", 0, 1),
+        import_id(0),
+        encode_abc("CALL", 0, 1, result_count + 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([result_count, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    out.append(3)
+    out += varint(1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_mixed_spill_shadowing_multi_return_chunk(prefix_count=127):
+    strings = [f"value{index}" for index in range(prefix_count)] + ["provider", "second"]
+    words = [encode_ad("LOADN", 0, index) for index in range(prefix_count)]
+    words.extend(
+        [
+            encode_ad("GETIMPORT", 0, 1),
+            import_id(0),
+            encode_abc("CALL", 0, 1, 3),
+            encode_abc("RETURN", 0, 3, 0),
+        ]
+    )
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([2, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    out.append(3)
+    out += varint(prefix_count + 1)
+    out.append(4)
+    out += struct.pack("<I", import_id(0))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(prefix_count + 2)
+    for index in range(prefix_count):
+        out += varint(index + 1)
+        out += varint(index + 1)
+        out += varint(index + 2)
+        out.append(0)
+    for string_id, reg_id in (
+        (prefix_count + 1, 0),
+        (prefix_count + 2, 1),
+    ):
+        out += varint(string_id)
+        out += varint(prefix_count + 3)
+        out += varint(prefix_count + 4)
+        out.append(reg_id)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_overlapping_multi_return_call_chunk():
     strings = ["provider", "print"]
     words = [
@@ -8442,6 +8950,16 @@ class ChunkTests(unittest.TestCase):
         self.assertEqual(source.count("local value ="), 2)
         self.assertNotIn('\nvalue = "inner"', source)
 
+    def test_decompile_spills_excess_sequential_debug_locals(self):
+        chunk = parse_chunk(make_sequential_debug_locals_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals = {}", source)
+        self.assertIn("__flow_locals.value128 = 128", source)
+        self.assertEqual(source.splitlines()[-1], "return __flow_locals.value200")
+        self.assertLessEqual(len(re.findall(r"(?m)^\s*local\b", source)), 129)
+
     def test_decompile_omits_fastcall_hint_before_fallback_call(self):
         chunk = parse_chunk(make_fastcall_fallback_call_chunk())
 
@@ -8614,6 +9132,15 @@ class ChunkTests(unittest.TestCase):
         self.assertIn('local r0 = {name = "maker"}\nprint(r0)\nreturn r0', source)
         self.assertNotIn('print({name = "maker"})', source)
         self.assertNotIn('return {name = "maker"}', source)
+
+    def test_decompile_spills_excess_materialized_tables(self):
+        chunk = parse_chunk(make_many_materialized_tables_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals = {}", source)
+        self.assertIn("__flow_locals.r2 = {}", source)
+        self.assertLessEqual(len(re.findall(r"(?m)^\s*local\b", source)), 129)
 
     def test_decompile_duptable_template_constants(self):
         chunk = parse_chunk(make_duptable_call_chunk())
@@ -9734,6 +10261,15 @@ class ChunkTests(unittest.TestCase):
         self.assertNotIn("FORGPREP", source)
         self.assertNotIn("FORGLOOP", source)
 
+    def test_decompile_does_not_emit_uncompilable_wide_generic_for(self):
+        chunk = parse_chunk(make_generic_for_named_call_chunk(var_count=201))
+
+        source = decompile_chunk(chunk)
+
+        self.assertNotIn("for key, value, r5", source)
+        self.assertIn("FORGPREP", source)
+        self.assertIn("FORGLOOP", source)
+
     def test_decompile_generic_for_uses_call_iterator_expression(self):
         chunk = parse_chunk(make_generic_for_call_iterator_chunk())
 
@@ -9941,6 +10477,45 @@ class ChunkTests(unittest.TestCase):
         )
         self.assertNotIn("local captured0 = 0", source)
 
+    def test_decompile_spills_excess_value_capture_snapshots(self):
+        chunk = parse_chunk(make_many_value_captures_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals = {}", source)
+        self.assertIn("__flow_locals.captured128 = 128", source)
+        self.assertIn("return __flow_locals.captured209", source)
+        self.assertLessEqual(len(re.findall(r"(?m)^\s*local\b", source)), 129)
+
+    def test_decompile_nested_spill_table_does_not_shadow_captured_parent(self):
+        chunk = parse_chunk(make_nested_spilled_capture_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals = {}", source)
+        self.assertIn("    local __flow_locals_p1 = {}", source)
+        self.assertIn("    return __flow_locals.captured128", source)
+
+    def test_decompile_spill_collision_keeps_parent_and_child_tables_distinct(self):
+        chunk = parse_chunk(make_nested_spilled_capture_chunk(reserve_spill_names=True))
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals_2 = {}", source)
+        self.assertIn("    local __flow_locals_p1_2 = {}", source)
+        self.assertIn("    return __flow_locals_2.captured128", source)
+
+    def test_decompile_spilled_debug_local_capture_uses_storage_expression(self):
+        chunk = parse_chunk(make_spilled_debug_capture_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("__flow_locals.x = 999", source)
+        capture = re.search(r"(__flow_locals\.captured\d+) = __flow_locals\.x", source)
+        self.assertIsNotNone(capture)
+        self.assertIn(f"    return {capture.group(1)}", source)
+        self.assertNotIn("    return x", source)
+
     def test_decompile_setupvalue_uses_debug_upvalue_name(self):
         chunk = parse_chunk(make_setupvalue_chunk())
 
@@ -9980,6 +10555,24 @@ class ChunkTests(unittest.TestCase):
             source,
         )
         self.assertEqual(source.count('return "ok"'), 1)
+
+    def test_decompile_spills_excess_named_local_functions(self):
+        chunk = parse_chunk(make_many_named_closures_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals = {}", source)
+        self.assertIn("__flow_locals.helper_129 = function()", source)
+        self.assertIn("__flow_locals.helper_129()", source)
+        self.assertLessEqual(len(re.findall(r"(?m)^\s*local\b", source)), 129)
+
+    def test_decompile_reuses_spilled_debug_closure_storage(self):
+        chunk = parse_chunk(make_reassigned_spilled_debug_closure_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertEqual(source.count("__flow_locals.helper = function()"), 2)
+        self.assertNotIn("function helper()", source)
 
     def test_decompile_immediate_closure_call_uses_parenthesized_iife(self):
         chunk = parse_chunk(make_immediate_closure_call_chunk())
@@ -10032,6 +10625,21 @@ class ChunkTests(unittest.TestCase):
             source,
         )
         self.assertEqual(source.count("compute()"), 1)
+
+    def test_decompile_spills_excess_materialized_locals(self):
+        chunk = parse_chunk(make_many_materialized_call_results_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals = {}", source)
+        spill = re.search(
+            r"(__flow_locals\.r0(?:_\d+)?) = compute\(\)\n"
+            r"print\(\1, \1\)",
+            source,
+        )
+        self.assertIsNotNone(spill)
+        self.assertEqual(source.count("compute()"), 210)
+        self.assertLessEqual(len(re.findall(r"(?m)^\s*local\b", source)), 161)
 
     def test_decompile_reused_moved_call_result_materializes_alias(self):
         chunk = parse_chunk(make_reused_call_result_through_move_chunk())
@@ -10206,13 +10814,38 @@ class ChunkTests(unittest.TestCase):
         self.assertIn("local r0, r1 = provider()\nprint(r0, r1)", source)
         self.assertNotIn("print(provider(), r1)", source)
 
+    def test_decompile_spills_wide_multi_return_results(self):
+        chunk = parse_chunk(make_wide_multi_return_call_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local __flow_locals = {}", source)
+        self.assertIn("__flow_locals.r128", source)
+        self.assertEqual(source.count("provider()"), 1)
+        self.assertLessEqual(len(re.findall(r"(?m)^\s*local\b", source)), 129)
+
+    def test_decompile_mixed_spill_evaluates_call_before_shadowing_local(self):
+        chunk = parse_chunk(make_mixed_spill_shadowing_multi_return_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("__flow_locals.__flow_results = {provider()}", source)
+        self.assertIn("local provider =", source)
+        call_index = source.find("{provider()}")
+        declaration_index = source.find("local provider =")
+        self.assertLess(call_index, declaration_index)
+        self.assertNotIn("local provider\nprovider,", source)
+
     def test_decompile_overlapping_multi_return_call_declares_missing_result(self):
         chunk = parse_chunk(make_overlapping_multi_return_call_chunk())
 
         source = decompile_chunk(chunk)
 
         self.assertIn("local r0, r1 = provider()", source)
-        self.assertIn("local r2 = nil\nr1, r2 = provider()\nprint(r1, r2)", source)
+        self.assertIn("__flow_locals.__flow_results = {provider()}", source)
+        self.assertIn("r1 = __flow_locals.__flow_results[1]", source)
+        self.assertIn("local r2 = __flow_locals.__flow_results[2]", source)
+        self.assertIn("print(r1, r2)", source)
         self.assertNotIn("print(provider(), r2)", source)
         self.assertNotIn("print(r1, provider)", source)
 

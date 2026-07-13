@@ -139,6 +139,12 @@ _ROBLOX_SERVICE_NAMES = {
     "Workspace",
 }
 
+# Luau caps active local registers at 200. Keep room for parameters, loop
+# variables, captures, and block-scoped locals that source reconstruction adds.
+_DIRECT_LOCAL_BUDGET = 128
+_MAX_MULTI_ASSIGNMENT_WIDTH = 64
+_MAX_SOURCE_LOCALS = 199
+
 
 def _quote_string(value: str) -> str:
     source = json.dumps(value, ensure_ascii=False)
@@ -513,6 +519,23 @@ def _parameter_names(proto: Proto, reserved_names: set[str] | None = None) -> li
     return params
 
 
+def _source_identifiers(protos: list[Proto]) -> frozenset[str]:
+    names: set[str] = set()
+    for proto in protos:
+        names.update(name for name in proto.debug_upvalues if name and _is_identifier(name))
+        names.update(
+            local.name for local in proto.debug_locals if local.name and _is_identifier(local.name)
+        )
+        if proto.debugname and _is_identifier(proto.debugname):
+            names.add(proto.debugname)
+        names.update(
+            str(const.value)
+            for const in proto.constants
+            if const.kind == "string" and _is_identifier(str(const.value))
+        )
+    return frozenset(names)
+
+
 def _child_proto(parent: Proto, index: int, protos: list[Proto] | None) -> Proto | None:
     if protos is None:
         return None
@@ -539,9 +562,14 @@ def _closure_constant_proto(proto: Proto, index: int, protos: list[Proto] | None
     return None
 
 
-def _function_expr(proto: Proto, protos: list[Proto] | None, upvalue_names: dict[int, str] | None = None) -> str:
+def _function_expr(
+    proto: Proto,
+    protos: list[Proto] | None,
+    upvalue_names: dict[int, str] | None = None,
+    reserved_identifiers: frozenset[str] | None = None,
+) -> str:
     params = ", ".join(_parameter_names(proto, set(upvalue_names.values()) if upvalue_names else None))
-    body = decompile_proto(proto, protos, upvalue_names).rstrip()
+    body = decompile_proto(proto, protos, upvalue_names, reserved_identifiers).rstrip()
     if not body:
         return f"function({params})\nend"
 
@@ -549,8 +577,13 @@ def _function_expr(proto: Proto, protos: list[Proto] | None, upvalue_names: dict
     return f"function({params})\n" + "\n".join(body_lines) + "\nend"
 
 
-def _function_body_lines(proto: Proto, protos: list[Proto] | None, upvalue_names: dict[int, str] | None = None) -> list[str]:
-    body = decompile_proto(proto, protos, upvalue_names).rstrip()
+def _function_body_lines(
+    proto: Proto,
+    protos: list[Proto] | None,
+    upvalue_names: dict[int, str] | None = None,
+    reserved_identifiers: frozenset[str] | None = None,
+) -> list[str]:
+    body = decompile_proto(proto, protos, upvalue_names, reserved_identifiers).rstrip()
     return body.splitlines() if body else []
 
 
@@ -592,6 +625,7 @@ def decompile_proto(
     proto: Proto,
     protos: list[Proto] | None = None,
     upvalue_names: dict[int, str] | None = None,
+    reserved_identifiers: frozenset[str] | None = None,
 ) -> str:
     lines = []
     parameter_names = _parameter_names(proto, set(upvalue_names.values()) if upvalue_names else None)
@@ -607,9 +641,27 @@ def decompile_proto(
     next_capture_local = 0
     open_results: tuple[int, list[str]] | None = None
     declared_locals: set[tuple[int, str, int, int]] = set()
+    debug_local_storage: dict[tuple[int, str, int, int], str] = {}
     inferred_locals: set[str] = set()
+    inferred_local_storage: dict[str, str] = {}
     reserved_local_names: set[str] = set()
+    spill_field_names: set[str] = set()
+    source_local_count = proto.numparams
+    spill_table_written = False
     encoded_header_written = False
+
+    if reserved_identifiers is None:
+        reserved_identifiers = _source_identifiers(protos or [proto])
+    unavailable_spill_names = set(reserved_identifiers)
+    unavailable_spill_names.update(parameter_names)
+
+    spill_table_base = "__flow_locals" if proto.id == 0 else f"__flow_locals_p{proto.id}"
+    spill_table_name = spill_table_base
+    spill_suffix = 2
+    while spill_table_name in unavailable_spill_names:
+        spill_table_name = f"{spill_table_base}_{spill_suffix}"
+        spill_suffix += 1
+    reserved_local_names.add(spill_table_name)
 
     def reg(reg_id: int) -> str:
         return regs.get(reg_id, f"r{reg_id}")
@@ -632,6 +684,86 @@ def decompile_proto(
         for line in value_lines:
             lines.append(f"{prefix}{line}")
 
+    def note_direct_locals(count: int = 1) -> None:
+        nonlocal source_local_count
+        source_local_count += count
+
+    def ensure_spill_table() -> None:
+        nonlocal source_local_count, spill_table_written
+        if spill_table_written:
+            return
+        lines.insert(0, f"local {spill_table_name} = {{}}")
+        source_local_count += 1
+        spill_table_written = True
+
+    def allocate_spill_storage(name: str) -> str:
+        ensure_spill_table()
+        field_name = name
+        suffix = 2
+        while field_name in spill_field_names:
+            field_name = f"{name}_{suffix}"
+            suffix += 1
+        spill_field_names.add(field_name)
+        return _field_expr(spill_table_name, field_name)
+
+    def declare_debug_value(
+        key: tuple[int, str, int, int],
+        name: str,
+        value: str,
+        indent: int,
+    ) -> str:
+        storage = debug_local_storage.get(key)
+        if storage is not None:
+            if value != storage:
+                emit_line(indent, f"{storage} = {value}")
+            return storage
+
+        if source_local_count < _DIRECT_LOCAL_BUDGET:
+            emit_line(indent, f"local {name} = {value}")
+            note_direct_locals()
+            storage = name
+        else:
+            storage = allocate_spill_storage(name)
+            emit_line(indent, f"{storage} = {value}")
+
+        debug_local_storage[key] = storage
+        return storage
+
+    def declare_inferred_value(
+        name: str,
+        value: str,
+        indent: int,
+        type_name: str | None = None,
+    ) -> str:
+        storage = inferred_local_storage.get(name)
+        if storage is not None:
+            if value != storage:
+                emit_line(indent, f"{storage} = {value}")
+            return storage
+
+        if source_local_count < _DIRECT_LOCAL_BUDGET:
+            annotation = f": {type_name}" if type_name is not None else ""
+            emit_line(indent, f"local {name}{annotation} = {value}")
+            note_direct_locals()
+            storage = name
+        else:
+            storage = allocate_spill_storage(name)
+            emit_line(indent, f"{storage} = {value}")
+
+        inferred_locals.add(name)
+        inferred_local_storage[name] = storage
+        return storage
+
+    def declare_capture_value(name: str, value: str, indent: int) -> str:
+        if source_local_count < _DIRECT_LOCAL_BUDGET:
+            emit_line(indent, f"local {name} = {value}")
+            note_direct_locals()
+            return name
+
+        storage = allocate_spill_storage(name)
+        emit_line(indent, f"{storage} = {value}")
+        return storage
+
     def emit_local_function(
         indent: int,
         name: str,
@@ -639,6 +771,7 @@ def decompile_proto(
         child_upvalue_names: dict[int, str] | None = None,
         *,
         declare_local: bool = True,
+        target: str | None = None,
     ) -> None:
         params = ", ".join(
             _parameter_names(
@@ -646,9 +779,20 @@ def decompile_proto(
                 set(child_upvalue_names.values()) if child_upvalue_names else None,
             )
         )
-        keyword = "local function" if declare_local else "function"
-        emit_line(indent, f"{keyword} {name}({params})")
-        for line in _function_body_lines(child, protos, child_upvalue_names):
+        storage = target or name
+        if storage != name:
+            emit_line(indent, f"{storage} = function({params})")
+        else:
+            keyword = "local function" if declare_local else "function"
+            emit_line(indent, f"{keyword} {name}({params})")
+            if declare_local:
+                note_direct_locals()
+        for line in _function_body_lines(
+            child,
+            protos,
+            child_upvalue_names,
+            reserved_identifiers,
+        ):
             emit_line(indent + 1, line)
         emit_line(indent, "end")
 
@@ -686,13 +830,36 @@ def decompile_proto(
         if local_name is not None and reg_id >= proto.numparams:
             key = local_key(reg_id, local_name, pc)
             if key not in declared_locals:
-                emit_line(indent, f"local {local_name} = {value}")
+                storage = declare_debug_value(key, local_name, value, indent)
                 declared_locals.add(key)
-            elif value != local_name:
-                emit_line(indent, f"{local_name} = {value}")
-            set_reg(reg_id, local_name)
+            else:
+                storage = debug_local_storage.get(key, local_name)
+                if value != storage:
+                    emit_line(indent, f"{storage} = {value}")
+            set_reg(reg_id, storage)
         else:
             set_reg(reg_id, value)
+
+    def emit_multi_storage_assignment(
+        storages: list[str],
+        value: str,
+        indent: int,
+        direct_names: list[str] | None = None,
+    ) -> None:
+        direct = set(direct_names or ())
+        if len(storages) <= _MAX_MULTI_ASSIGNMENT_WIDTH and len(direct) == len(storages):
+            emit_line(indent, f"local {', '.join(storages)} = {value}")
+            return
+        if len(storages) <= _MAX_MULTI_ASSIGNMENT_WIDTH and not direct:
+            emit_line(indent, f"{', '.join(storages)} = {value}")
+            return
+
+        packed = allocate_spill_storage("__flow_results")
+        emit_line(indent, f"{packed} = {{{value}}}")
+        for index, storage in enumerate(storages, 1):
+            prefix = "local " if storage in direct else ""
+            emit_line(indent, f"{prefix}{storage} = {_index_expr(packed, str(index))}")
+        emit_line(indent, f"{packed} = nil")
 
     def declare_multi_result_locals(reg_id: int, count: int, value: str, pc: int, indent: int) -> bool:
         names = []
@@ -706,11 +873,27 @@ def decompile_proto(
             names.append(local_name)
             keys.append(key)
 
-        emit_line(indent, f"local {', '.join(names)} = {value}")
-        for offset, (local_name, key) in enumerate(zip(names, keys)):
+        storages = []
+        direct_names = []
+        for local_name, key in zip(names, keys):
+            if source_local_count < _DIRECT_LOCAL_BUDGET:
+                storage = local_name
+                direct_names.append(local_name)
+                note_direct_locals()
+            else:
+                storage = allocate_spill_storage(local_name)
+            debug_local_storage[key] = storage
+            storages.append(storage)
+
+        if len(direct_names) == len(names) and len(names) <= _MAX_MULTI_ASSIGNMENT_WIDTH:
+            emit_line(indent, f"local {', '.join(names)} = {value}")
+        else:
+            emit_multi_storage_assignment(storages, value, indent, direct_names)
+
+        for offset, (storage, key) in enumerate(zip(storages, keys)):
             target = reg_id + offset
             declared_locals.add(key)
-            set_reg(target, local_name)
+            set_reg(target, storage)
         return True
 
     def assign_multi_result_locals(reg_id: int, count: int, value: str, pc: int, indent: int) -> bool:
@@ -726,16 +909,16 @@ def decompile_proto(
             key = local_key(target, local_name, pc)
             if target >= proto.numparams and key not in declared_locals:
                 return False
-            names.append(local_name)
+            names.append(debug_local_storage.get(key, local_name))
 
-        emit_line(indent, f"{', '.join(names)} = {value}")
-        for offset, local_name in enumerate(names):
-            set_reg(reg_id + offset, local_name)
+        emit_multi_storage_assignment(names, value, indent)
+        for offset, storage in enumerate(names):
+            set_reg(reg_id + offset, storage)
         return True
 
     def assign_mixed_multi_result_locals(reg_id: int, count: int, value: str, pc: int, indent: int) -> bool:
         names = []
-        missing = []
+        missing_direct = []
         for offset in range(count):
             target = reg_id + offset
             if target < proto.numparams:
@@ -751,21 +934,27 @@ def decompile_proto(
                 local_name = f"r{target}"
 
             key = local_key(target, local_name, pc)
-            names.append(local_name)
-            if key not in declared_locals:
-                missing.append((local_name, key))
+            storage = debug_local_storage.get(key)
+            if storage is None:
+                if key in declared_locals:
+                    storage = local_name
+                else:
+                    if source_local_count < _DIRECT_LOCAL_BUDGET:
+                        storage = local_name
+                        missing_direct.append(local_name)
+                        note_direct_locals()
+                    else:
+                        storage = allocate_spill_storage(local_name)
+                    declared_locals.add(key)
+                debug_local_storage[key] = storage
+            names.append(storage)
 
-        if missing:
-            emit_line(indent, f"local {', '.join(name for name, _ in missing)} = nil")
-            for _, key in missing:
-                declared_locals.add(key)
-
-        emit_line(indent, f"{', '.join(names)} = {value}")
-        for offset, local_name in enumerate(names):
-            set_reg(reg_id + offset, local_name)
+        emit_multi_storage_assignment(names, value, indent, missing_direct)
+        for offset, storage in enumerate(names):
+            set_reg(reg_id + offset, storage)
         return True
 
-    def allocate_capture_local_name() -> str:
+    def allocate_capture_local_name(preferred_name: str | None = None) -> str:
         nonlocal next_capture_local
         used_names = set(inferred_locals)
         used_names.update(reserved_local_names)
@@ -778,26 +967,33 @@ def decompile_proto(
             for index in range(proto.numupvalues)
         )
 
+        if preferred_name is not None and _is_identifier(preferred_name) and preferred_name not in used_names:
+            return preferred_name
+
         while True:
             name = f"captured{next_capture_local}"
             next_capture_local += 1
             if name not in used_names:
                 return name
 
-    def capture_source_name(capture, indent: int | None = None, upvalue_index: int | None = None) -> str | None:
+    def capture_source_name(
+        capture,
+        indent: int | None = None,
+        upvalue_index: int | None = None,
+        preferred_name: str | None = None,
+    ) -> str | None:
         nonlocal next_capture_local
         if capture.a in {0, 1}:
-            local_name = _debug_local_name(proto, capture.b, capture.pc)
-            value = local_name or reg(capture.b)
+            value = reg(capture.b)
             if capture.a == 0 and capture.b in mutable_capture_locals:
                 cached = value_capture_locals.get(capture.b)
                 if cached is not None and cached[0] == value:
                     return cached[1]
                 if indent is not None and upvalue_index is not None:
-                    name = allocate_capture_local_name()
-                    emit_line(indent, f"local {name} = {value}")
-                    value_capture_locals[capture.b] = (value, name)
-                    return name
+                    name = allocate_capture_local_name(preferred_name)
+                    storage = declare_capture_value(name, value, indent)
+                    value_capture_locals[capture.b] = (value, storage)
+                    return storage
                 return None
             if _is_identifier(value):
                 return value
@@ -806,14 +1002,14 @@ def decompile_proto(
                 if cached is not None and cached[0] == value:
                     return cached[1]
             if indent is not None and upvalue_index is not None:
-                name = allocate_capture_local_name()
-                emit_line(indent, f"local {name} = {value}")
+                name = allocate_capture_local_name(preferred_name)
+                storage = declare_capture_value(name, value, indent)
                 if capture.a == 1:
-                    mutable_capture_locals[capture.b] = name
-                    set_reg(capture.b, name)
+                    mutable_capture_locals[capture.b] = storage
+                    set_reg(capture.b, storage)
                 else:
-                    value_capture_locals[capture.b] = (value, name)
-                return name
+                    value_capture_locals[capture.b] = (value, storage)
+                return storage
             return None
         if capture.a == 2:
             value = _upvalue_name(proto, capture.b, upvalue_names)
@@ -830,13 +1026,14 @@ def decompile_proto(
                 break
             if indent is not None and capture.a in {0, 1} and capture.b in pending_table_locals:
                 emit_pending_table_local(capture.b, indent)
-            name = None
+            debug_name = None
             if child is not None and 0 <= upvalue_index < len(child.debug_upvalues):
                 debug_name = child.debug_upvalues[upvalue_index]
-                if debug_name and _is_identifier(debug_name):
-                    name = debug_name
+                if not debug_name or not _is_identifier(debug_name):
+                    debug_name = None
+            name = capture_source_name(capture, indent, upvalue_index, debug_name)
             if name is None:
-                name = capture_source_name(capture, indent, upvalue_index)
+                name = debug_name
             if name is not None:
                 names[upvalue_index] = name
             upvalue_index += 1
@@ -912,10 +1109,11 @@ def decompile_proto(
             if indent is None:
                 return False
             table.materialized = True
-            emit_line(indent, f"local {local_name} = {source_name}")
-            declared_locals.add(local_key(target, local_name, pc))
+            key = local_key(target, local_name, pc)
+            storage = declare_debug_value(key, local_name, source_name, indent)
+            declared_locals.add(key)
             table_literals[target] = table
-            regs[target] = local_name
+            regs[target] = storage
             if open_results is not None and target >= open_results[0]:
                 open_results = None
             return True
@@ -934,10 +1132,12 @@ def decompile_proto(
 
         local_name, key = pending
         if key not in declared_locals:
-            emit_line(indent, f"local {local_name} = {table.render()}")
+            storage = declare_debug_value(key, local_name, table.render(), indent)
             declared_locals.add(key)
+        else:
+            storage = debug_local_storage.get(key, local_name)
         table.materialized = True
-        regs[reg_id] = local_name
+        regs[reg_id] = storage
         return True
 
     def materialize_table_reg(reg_id: int, indent: int) -> bool:
@@ -953,12 +1153,18 @@ def decompile_proto(
         local_name = regs.get(reg_id)
         if local_name is None or not _is_identifier(local_name) or local_name == rendered:
             local_name = f"r{reg_id}"
-        emit_line(indent, f"local {local_name} = {rendered}")
+        if source_local_count < _DIRECT_LOCAL_BUDGET:
+            emit_line(indent, f"local {local_name} = {rendered}")
+            note_direct_locals()
+            storage = local_name
+        else:
+            storage = allocate_spill_storage(local_name)
+            emit_line(indent, f"{storage} = {rendered}")
         table.materialized = True
-        regs[reg_id] = local_name
+        regs[reg_id] = storage
         for alias_id, candidate in table_literals.items():
             if alias_id != reg_id and candidate is table and regs.get(alias_id) == rendered:
-                regs[alias_id] = local_name
+                regs[alias_id] = storage
         return True
 
     def refresh_table_aliases(table: TableLiteral) -> None:
@@ -1589,16 +1795,18 @@ def decompile_proto(
 
                 key = local_key(reg_id, local_name, instructions[end_index].pc)
                 already_declared = reg_id < proto.numparams or key in declared_locals or local_name in inferred_locals
+                if debug_name is not None and key in declared_locals:
+                    local_name = debug_local_storage.get(key, local_name)
                 current = reg(reg_id)
                 if not already_declared:
                     initial = guarded_fallback_value(reg_id) if current == local_name else current
                     if initial is None:
                         initial = "nil"
-                    emit_line(indent, f"local {local_name} = {initial}")
                     if debug_name is not None:
+                        local_name = declare_debug_value(key, local_name, initial, indent)
                         declared_locals.add(key)
                     else:
-                        inferred_locals.add(local_name)
+                        local_name = declare_inferred_value(local_name, initial, indent)
                 elif current != local_name and reg_id >= proto.numparams:
                     emit_line(indent, f"{local_name} = {current}")
 
@@ -1670,10 +1878,8 @@ def decompile_proto(
             if local_name is None or not _is_identifier(local_name):
                 return False
             local_name = unique_inferred_local_name(local_name)
-            if local_name not in inferred_locals:
-                emit_line(indent, f"local {local_name} = {value}")
-                inferred_locals.add(local_name)
-            set_reg(reg_id, local_name)
+            storage = declare_inferred_value(local_name, value, indent)
+            set_reg(reg_id, storage)
             return True
 
         def instruction_reads_register(candidate, reg_id: int) -> bool:
@@ -1856,17 +2062,17 @@ def decompile_proto(
                 if debug_name is not None:
                     key = local_key(reg_id, debug_name, instructions[instruction_index].pc)
                     if key in declared_locals:
-                        emit_line(indent, f"{debug_name} = {upvalue_name}")
+                        storage = debug_local_storage.get(key, debug_name)
+                        emit_line(indent, f"{storage} = {upvalue_name}")
                     else:
-                        emit_line(indent, f"local {debug_name} = {upvalue_name}")
+                        storage = declare_debug_value(key, debug_name, upvalue_name, indent)
                         declared_locals.add(key)
-                    set_reg(reg_id, debug_name)
+                    set_reg(reg_id, storage)
                     continue
 
                 local_name = unique_inferred_local_name(f"r{reg_id}")
-                emit_line(indent, f"local {local_name} = {upvalue_name}")
-                inferred_locals.add(local_name)
-                set_reg(reg_id, local_name)
+                storage = declare_inferred_value(local_name, upvalue_name, indent)
+                set_reg(reg_id, storage)
 
         def previous_register_write_count(stop_index: int, reg_id: int) -> int:
             return sum(
@@ -3292,6 +3498,8 @@ def decompile_proto(
                         maybe_loop.op.name == "FORGLOOP"
                         and maybe_loop.a == insn.a
                         and maybe_loop.jump_target == insn.next_pc
+                        and source_local_count + max((maybe_loop.aux or 1) & 0xFF, 1)
+                        <= _MAX_SOURCE_LOCALS
                     ):
                         var_count = (maybe_loop.aux or 1) & 0xFF
                         if var_count <= 0:
@@ -3318,6 +3526,7 @@ def decompile_proto(
                         saved_tables = clone_tables()
                         saved_reserved_names = set(reserved_local_names)
                         open_results = None
+                        note_direct_locals(var_count)
                         for offset, loop_var in enumerate(loop_vars):
                             regs[insn.a + 3 + offset] = loop_var
                             table_literals.pop(insn.a + 3 + offset, None)
@@ -3326,6 +3535,7 @@ def decompile_proto(
                         emit_line(indent, f"for {', '.join(loop_vars)} in {', '.join(iterator_values)} do")
                         emit_range(body_index, maybe_loop.pc, indent + 1, maybe_loop.pc, maybe_loop.next_pc)
                         emit_line(indent, "end")
+                        note_direct_locals(-var_count)
                         regs = saved_regs
                         table_literals = saved_tables
                         reserved_local_names.clear()
@@ -3887,20 +4097,40 @@ def decompile_proto(
                     child_upvalue_names = closure_upvalue_names(index, child, indent)
                     if local_name is not None:
                         key = local_key(insn.a, local_name, insn.next_pc) if inferred_name is None else None
+                        declare_local = inferred_name is not None or key not in declared_locals
+                        storage = (
+                            inferred_local_storage.get(inferred_name, local_name)
+                            if inferred_name is not None
+                            else debug_local_storage.get(key, local_name)
+                        )
+                        if declare_local and source_local_count >= _DIRECT_LOCAL_BUDGET:
+                            storage = allocate_spill_storage(local_name)
+                            declare_local = False
                         emit_local_function(
                             indent,
                             local_name,
                             child,
                             child_upvalue_names,
-                            declare_local=inferred_name is not None or key not in declared_locals,
+                            declare_local=declare_local,
+                            target=storage,
                         )
                         if inferred_name is not None:
                             inferred_locals.add(inferred_name)
+                            inferred_local_storage[inferred_name] = storage
                         elif key is not None:
                             declared_locals.add(key)
-                        set_reg(insn.a, local_name)
+                            debug_local_storage[key] = storage
+                        set_reg(insn.a, storage)
                     else:
-                        set_reg(insn.a, _function_expr(child, protos, child_upvalue_names))
+                        set_reg(
+                            insn.a,
+                            _function_expr(
+                                child,
+                                protos,
+                                child_upvalue_names,
+                                reserved_identifiers,
+                            ),
+                        )
                 else:
                     emit_line(indent, f"-- pc {insn.pc}: {insn.disassemble()}")
                     open_results = None
@@ -3921,20 +4151,40 @@ def decompile_proto(
                     child_upvalue_names = closure_upvalue_names(index, child, indent)
                     if local_name is not None:
                         key = local_key(insn.a, local_name, insn.next_pc) if inferred_name is None else None
+                        declare_local = inferred_name is not None or key not in declared_locals
+                        storage = (
+                            inferred_local_storage.get(inferred_name, local_name)
+                            if inferred_name is not None
+                            else debug_local_storage.get(key, local_name)
+                        )
+                        if declare_local and source_local_count >= _DIRECT_LOCAL_BUDGET:
+                            storage = allocate_spill_storage(local_name)
+                            declare_local = False
                         emit_local_function(
                             indent,
                             local_name,
                             child,
                             child_upvalue_names,
-                            declare_local=inferred_name is not None or key not in declared_locals,
+                            declare_local=declare_local,
+                            target=storage,
                         )
                         if inferred_name is not None:
                             inferred_locals.add(inferred_name)
+                            inferred_local_storage[inferred_name] = storage
                         elif key is not None:
                             declared_locals.add(key)
-                        set_reg(insn.a, local_name)
+                            debug_local_storage[key] = storage
+                        set_reg(insn.a, storage)
                     else:
-                        set_reg(insn.a, _function_expr(child, protos, child_upvalue_names))
+                        set_reg(
+                            insn.a,
+                            _function_expr(
+                                child,
+                                protos,
+                                child_upvalue_names,
+                                reserved_identifiers,
+                            ),
+                        )
                 else:
                     emit_line(indent, f"-- pc {insn.pc}: {insn.disassemble()}")
                     open_results = None
@@ -4159,23 +4409,23 @@ def decompile_proto(
                         service_name = inferred_service_name(receiver, method, args)
                         debug_name = _debug_local_name(proto, insn.a, insn.next_pc)
                         if service_name is not None and debug_name is None:
-                            if service_name not in inferred_locals:
-                                emit_line(indent, f"local {service_name}: {service_name} = {call}")
-                                inferred_locals.add(service_name)
-                            set_reg(insn.a, service_name)
+                            storage = inferred_local_storage.get(service_name)
+                            if storage is None:
+                                storage = declare_inferred_value(
+                                    service_name,
+                                    call,
+                                    indent,
+                                    service_name,
+                                )
+                            set_reg(insn.a, storage)
                         elif debug_name is None and future_register_read_count(index + 1, insn.a) > 0:
                             inferred_name = inferred_namecall_local_name(receiver, method, args)
                             if declare_inferred_local(insn.a, inferred_name, call, indent):
                                 pass
                             elif future_register_read_needs_snapshot(index + 1, insn.a):
                                 local_name = unique_inferred_local_name(f"r{insn.a}")
-                                key = local_key(insn.a, local_name, insn.next_pc)
-                                if key not in declared_locals:
-                                    emit_line(indent, f"local {local_name} = {call}")
-                                    declared_locals.add(key)
-                                elif call != local_name:
-                                    emit_line(indent, f"{local_name} = {call}")
-                                set_reg(insn.a, local_name)
+                                storage = declare_inferred_value(local_name, call, indent)
+                                set_reg(insn.a, storage)
                             else:
                                 set_reg_or_declare_local(insn.a, call, insn.next_pc, indent)
                         else:
@@ -4184,10 +4434,10 @@ def decompile_proto(
                         module_name = inferred_require_name(call_target or "", args)
                         debug_name = _debug_local_name(proto, insn.a, insn.next_pc)
                         if module_name is not None and debug_name is None and future_register_read_needs_snapshot(index + 1, insn.a):
-                            if module_name not in inferred_locals:
-                                emit_line(indent, f"local {module_name} = {call}")
-                                inferred_locals.add(module_name)
-                            set_reg(insn.a, module_name)
+                            storage = inferred_local_storage.get(module_name)
+                            if storage is None:
+                                storage = declare_inferred_value(module_name, call, indent)
+                            set_reg(insn.a, storage)
                         elif debug_name is None and future_register_read_needs_snapshot(index + 1, insn.a):
                             if not declare_inferred_local(insn.a, f"r{insn.a}", call, indent):
                                 set_reg_or_declare_local(insn.a, call, insn.next_pc, indent)
@@ -4273,4 +4523,9 @@ def decompile_chunk(chunk: BytecodeChunk, proto_id: int | None = None) -> str:
         "-- Flow Decompiler",
         f"-- bytecode version {chunk.version}, type version {chunk.type_version}, proto {index}",
     ]
-    return "\n".join(header) + "\n" + decompile_proto(proto, chunk.protos)
+    reserved_identifiers = _source_identifiers(chunk.protos)
+    return "\n".join(header) + "\n" + decompile_proto(
+        proto,
+        chunk.protos,
+        reserved_identifiers=reserved_identifiers,
+    )

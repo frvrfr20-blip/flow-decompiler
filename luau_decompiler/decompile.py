@@ -9,15 +9,19 @@ import json
 from .chunk import BytecodeChunk, Proto, decompose_import_id
 from .opcodes import FASTCALL_OPS
 from .value_ir import (
+    BlockState,
     CallResultGroup,
+    CallResultValue,
     CallValue,
     ClosureValue,
     Effect,
     ExpressionValue,
+    LiteralValue,
     RegisterVersion,
     TableValue,
     UnknownValue,
     Value,
+    merge_states,
     requires_materialization,
 )
 
@@ -644,10 +648,15 @@ def decompile_proto(
     regs: dict[int, str] = {
         reg_id: parameter_names[reg_id] for reg_id in range(proto.numparams)
     }
-    value_versions: dict[int, RegisterVersion] = {
-        reg_id: RegisterVersion(reg_id, -1, UnknownValue(-1, "parameter", proto.id))
-        for reg_id in range(proto.numparams)
-    }
+    value_state = BlockState(
+        tuple(
+            (
+                reg_id,
+                RegisterVersion(reg_id, -1, UnknownValue(-1, "parameter", proto.id)),
+            )
+            for reg_id in range(proto.numparams)
+        )
+    )
     table_literals: dict[int, TableLiteral] = {}
     pending_table_locals: dict[int, tuple[str, tuple[int, str, int, int]]] = {}
     pending_namecalls: dict[int, tuple[str, str]] = {}
@@ -665,6 +674,10 @@ def decompile_proto(
     source_local_count = proto.numparams
     spill_table_written = False
     encoded_header_written = False
+    current_definition_pc = -1
+    call_result_sources: dict[str, str] = {}
+    call_result_widths: dict[str, int] = {}
+    materialized_call_results: dict[str, tuple[str, ...]] = {}
 
     if reserved_identifiers is None:
         reserved_identifiers = _source_identifiers(protos or [proto])
@@ -683,16 +696,30 @@ def decompile_proto(
         return regs.get(reg_id, f"r{reg_id}")
 
     def value_for(reg_id: int, pc: int) -> Value:
-        version = value_versions.get(reg_id)
+        version = value_state.get(reg_id)
         if version is not None:
             return version.value
         return UnknownValue(pc, "register has no definition", proto.id)
 
     def set_value_version(reg_id: int, definition_pc: int, value: Value) -> None:
-        value_versions[reg_id] = RegisterVersion(reg_id, definition_pc, value)
+        nonlocal value_state
+        value_state = value_state.with_version(RegisterVersion(reg_id, definition_pc, value))
 
     def alias_value_version(target: int, source: int, definition_pc: int) -> None:
-        set_value_version(target, definition_pc, value_for(source, definition_pc))
+        nonlocal value_state
+        value_state = value_state.with_alias(target, source, definition_pc)
+
+    def constant_value(index: int, pc: int) -> Value:
+        constant = proto.constant(index)
+        if constant is None:
+            return UnknownValue(pc, "constant is missing", proto.id, "LOADK")
+        try:
+            return LiteralValue(pc, constant.value)
+        except TypeError:
+            return UnknownValue(pc, f"unsupported {constant.kind} constant", proto.id, "LOADK")
+
+    def read_value(pc: int, operator: str, inputs: Iterator[Value] | tuple[Value, ...] = ()) -> Value:
+        return ExpressionValue(pc, operator, inputs, Effect.READ)
 
     def return_reg(reg_id: int, pc: int) -> str:
         current = reg(reg_id)
@@ -825,20 +852,44 @@ def decompile_proto(
             emit_line(indent + 1, line)
         emit_line(indent, "end")
 
+    def clone_table_map(source: dict[int, TableLiteral]) -> dict[int, TableLiteral]:
+        clones: dict[int, TableLiteral] = {}
+        result: dict[int, TableLiteral] = {}
+        for reg_id, table in source.items():
+            table_id = id(table)
+            clone = clones.get(table_id)
+            if clone is None:
+                clone = TableLiteral(
+                    dict(table.array),
+                    list(table.fields),
+                    table.materialized,
+                    list(table.writes),
+                )
+                clones[table_id] = clone
+            result[reg_id] = clone
+        return result
+
     def clone_tables() -> dict[int, TableLiteral]:
-        return {
-            reg_id: TableLiteral(dict(table.array), list(table.fields), table.materialized, list(table.writes))
-            for reg_id, table in table_literals.items()
-        }
+        return clone_table_map(table_literals)
 
     def set_reg(reg_id: int, value: str) -> None:
-        nonlocal open_results
+        nonlocal open_results, value_state
         value_capture_locals.pop(reg_id, None)
         regs[reg_id] = value
         table_literals.pop(reg_id, None)
         pending_table_locals.pop(reg_id, None)
         pending_iterator_calls.pop(reg_id, None)
-        value_versions.pop(reg_id, None)
+        value_state = value_state.with_version(
+            RegisterVersion(
+                reg_id,
+                current_definition_pc,
+                UnknownValue(
+                    current_definition_pc,
+                    "source-only register definition",
+                    proto.id,
+                ),
+            )
+        )
         if open_results is not None and reg_id >= open_results[0]:
             open_results = None
 
@@ -984,6 +1035,72 @@ def decompile_proto(
             set_reg(reg_id + offset, storage)
         return True
 
+    def remember_call_result_group(
+        group: CallResultGroup,
+        source: str,
+        planned_width: int,
+    ) -> None:
+        nonlocal value_state
+        identity = group.identity or f"call-results@{group.source_pc}:{group.base_register}"
+        call_result_sources[identity] = source
+        call_result_widths[identity] = planned_width
+        value_state = value_state.with_call_results(group)
+
+    def materialize_open_call_result(
+        group: CallResultGroup,
+        minimum_width: int,
+        pc: int,
+        indent: int,
+    ) -> tuple[str, ...]:
+        identity = group.identity or f"call-results@{group.source_pc}:{group.base_register}"
+        existing = materialized_call_results.get(identity)
+        if existing is not None:
+            if all(
+                reg(group.base_register + offset) == storage
+                for offset, storage in enumerate(existing)
+            ):
+                return existing
+            materialized_call_results.pop(identity, None)
+
+        source = call_result_sources.get(identity)
+        if source is None:
+            return ()
+        count = max(minimum_width, call_result_widths.get(identity, minimum_width))
+        count = max(count, 1)
+        base = group.base_register
+        stored = (
+            declare_multi_result_locals(base, count, source, pc, indent)
+            or assign_multi_result_locals(base, count, source, pc, indent)
+            or assign_mixed_multi_result_locals(base, count, source, pc, indent)
+        )
+        if not stored:
+            storages: list[str] = []
+            direct_names: list[str] = []
+            for offset in range(count):
+                target = base + offset
+                if target < proto.numparams:
+                    storage = reg(target)
+                else:
+                    name = unique_inferred_local_name(f"r{target}")
+                    if source_local_count < _DIRECT_LOCAL_BUDGET:
+                        storage = name
+                        direct_names.append(name)
+                        note_direct_locals()
+                    else:
+                        storage = allocate_spill_storage(name)
+                    inferred_locals.add(name)
+                    inferred_local_storage[name] = storage
+                storages.append(storage)
+            emit_multi_storage_assignment(storages, source, indent, direct_names)
+            for offset, storage in enumerate(storages):
+                set_reg(base + offset, storage)
+
+        storages = tuple(reg(base + offset) for offset in range(count))
+        for offset in range(count):
+            set_value_version(base + offset, group.source_pc, group.result(offset))
+        materialized_call_results[identity] = storages
+        return storages
+
     def allocate_capture_local_name(preferred_name: str | None = None) -> str:
         nonlocal next_capture_local
         used_names = set(inferred_locals)
@@ -1074,6 +1191,24 @@ def decompile_proto(
             upvalue_index += 1
             scan_index += 1
         return names
+
+    def closure_capture_values(closure_index: int) -> tuple[Value, ...]:
+        captures: list[Value] = []
+        scan_index = closure_index + 1
+        while scan_index < len(instructions):
+            capture = instructions[scan_index]
+            if capture.op.name != "CAPTURE":
+                break
+            if capture.a in {0, 1}:
+                captures.append(value_for(capture.b, capture.pc))
+            elif capture.a == 2:
+                captures.append(read_value(capture.pc, "captured upvalue"))
+            else:
+                captures.append(
+                    UnknownValue(capture.pc, "unsupported capture mode", proto.id, "CAPTURE")
+                )
+            scan_index += 1
+        return tuple(captures)
 
     def closure_captures_register(closure_index: int, reg_id: int) -> bool:
         scan_index = closure_index + 1
@@ -1364,7 +1499,7 @@ def decompile_proto(
         loop_exit_pc: int | None = None,
         branch_exit_pc: int | None = None,
     ) -> int:
-        nonlocal encoded_header_written, open_results, regs, table_literals
+        nonlocal current_definition_pc, encoded_header_written, materialized_call_results, open_results, regs, table_literals, value_state
 
         def emit_elseif_chain(else_index: int, end_pc: int) -> bool:
             nonlocal open_results, regs, table_literals
@@ -1453,10 +1588,7 @@ def decompile_proto(
             emit_range(body_index, branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc)
             if has_nested_else:
                 regs = dict(saved_regs)
-                table_literals = {
-                    reg_id: TableLiteral(dict(table.array), list(table.fields), table.materialized, list(table.writes))
-                    for reg_id, table in saved_tables.items()
-                }
+                table_literals = clone_table_map(saved_tables)
                 open_results = None
                 if not emit_elseif_chain(nested_else_index, end_pc):
                     else_line_index = len(lines)
@@ -1478,6 +1610,8 @@ def decompile_proto(
             dict[int, str],
             dict[int, tuple[str, str]],
             tuple[int, list[str]] | None,
+            dict[str, tuple[str, ...]],
+            BlockState,
         ]:
             return (
                 dict(regs),
@@ -1487,6 +1621,8 @@ def decompile_proto(
                 dict(mutable_capture_locals),
                 dict(value_capture_locals),
                 open_results,
+                dict(materialized_call_results),
+                value_state,
             )
 
         def restore_state(
@@ -1498,9 +1634,11 @@ def decompile_proto(
                 dict[int, str],
                 dict[int, tuple[str, str]],
                 tuple[int, list[str]] | None,
+                dict[str, tuple[str, ...]],
+                BlockState,
             ],
         ) -> None:
-            nonlocal mutable_capture_locals, open_results, pending_iterator_calls, pending_table_locals, regs, table_literals, value_capture_locals
+            nonlocal materialized_call_results, mutable_capture_locals, open_results, pending_iterator_calls, pending_table_locals, regs, table_literals, value_capture_locals, value_state
             (
                 regs,
                 table_literals,
@@ -1509,7 +1647,19 @@ def decompile_proto(
                 mutable_capture_locals,
                 value_capture_locals,
                 open_results,
+                materialized_call_results,
+                value_state,
             ) = saved
+
+        def restore_merged_state(
+            saved,
+            join_pc: int,
+            *predecessors: BlockState,
+        ) -> None:
+            nonlocal value_state
+            entry_state = saved[-1]
+            restore_state(saved)
+            value_state = merge_states(join_pc, (entry_state, *predecessors))
 
         def apply_condition_setup(index: int, limit_pc: int) -> int | None:
             while index < len(instructions):
@@ -1518,25 +1668,50 @@ def decompile_proto(
                     return index
                 if setup.op.name == "LOADB" and not setup.c:
                     set_reg(setup.a, "true" if setup.b else "false")
+                    set_value_version(setup.a, setup.pc, LiteralValue(setup.pc, bool(setup.b)))
                 elif setup.op.name == "LOADN":
                     set_reg(setup.a, str(setup.d))
+                    set_value_version(setup.a, setup.pc, LiteralValue(setup.pc, setup.d))
                 elif setup.op.name == "LOADK":
                     set_reg(setup.a, _literal(proto, setup.d))
+                    set_value_version(setup.a, setup.pc, constant_value(setup.d, setup.pc))
                 elif setup.op.name == "LOADKX" and setup.aux is not None:
                     set_reg(setup.a, _literal(proto, setup.aux))
+                    set_value_version(setup.a, setup.pc, constant_value(setup.aux, setup.pc))
                 elif setup.op.name == "MOVE":
                     if not alias_table_reg(setup.a, setup.b, setup.next_pc):
                         set_reg(setup.a, reg(setup.b))
+                    alias_value_version(setup.a, setup.b, setup.pc)
                 elif setup.op.name == "GETUPVAL":
                     set_reg(setup.a, _upvalue_name(proto, setup.b, upvalue_names))
+                    set_value_version(setup.a, setup.pc, read_value(setup.pc, "upvalue"))
                 elif setup.op.name in {"GETTABLEKS", "GETUDATAKS"} and setup.aux is not None:
                     key_index = _aux_key_index(setup.op.name, setup.aux)
                     key = proto.constant_text(key_index) or f"K{key_index}"
                     set_reg(setup.a, _field_expr(reg(setup.b), key))
+                    set_value_version(
+                        setup.a,
+                        setup.pc,
+                        read_value(setup.pc, ".", (value_for(setup.b, setup.pc),)),
+                    )
                 elif setup.op.name == "GETTABLE":
                     set_reg(setup.a, _index_expr(reg(setup.b), reg(setup.c)))
+                    set_value_version(
+                        setup.a,
+                        setup.pc,
+                        read_value(
+                            setup.pc,
+                            "[]",
+                            (value_for(setup.b, setup.pc), value_for(setup.c, setup.pc)),
+                        ),
+                    )
                 elif setup.op.name == "GETTABLEN":
                     set_reg(setup.a, _index_expr(reg(setup.b), str(setup.c + 1)))
+                    set_value_version(
+                        setup.a,
+                        setup.pc,
+                        read_value(setup.pc, "[]", (value_for(setup.b, setup.pc),)),
+                    )
                 else:
                     return index
                 index += 1
@@ -1912,6 +2087,32 @@ def decompile_proto(
                 suffix += 1
             return f"{local_name}_{suffix}"
 
+        def recursive_closure_storage(insn, child: Proto, indent: int) -> tuple[str, str]:
+            mutable_storage = mutable_capture_locals.get(insn.a)
+            if mutable_storage is not None:
+                return mutable_storage, mutable_storage
+
+            debug_name = _debug_local_name(proto, insn.a, insn.next_pc)
+            preferred_name = debug_name or child.debugname or f"r{insn.a}"
+            if not _is_identifier(preferred_name):
+                preferred_name = f"r{insn.a}"
+
+            if insn.a < proto.numparams:
+                storage = reg(insn.a)
+                return (storage if _is_identifier(storage) else preferred_name), storage
+
+            local_name = unique_inferred_local_name(preferred_name)
+            if debug_name is not None:
+                key = local_key(insn.a, debug_name, insn.next_pc)
+                storage = debug_local_storage.get(key)
+                if storage is None:
+                    storage = declare_debug_value(key, local_name, "nil", indent)
+                    debug_local_storage[key] = storage
+                    declared_locals.add(key)
+            else:
+                storage = declare_inferred_value(local_name, "nil", indent)
+            return local_name, storage
+
         def declare_inferred_local(reg_id: int, local_name: str | None, value: str, indent: int) -> bool:
             mutable_name = mutable_capture_locals.get(reg_id)
             if mutable_name is not None:
@@ -2003,6 +2204,36 @@ def decompile_proto(
             if name in _BINARY_OPS or name in _BINARY_K_OPS or name in _REVERSE_K_OPS or name in _UNARY_OPS or name == "CONCAT":
                 return candidate.a == reg_id
             return False
+
+        def required_open_result_width(start_index: int, group: CallResultGroup) -> int:
+            result_indexes = {
+                register: register - group.base_register
+                for register in range(group.base_register, proto.maxstacksize)
+            }
+            highest = 0
+            for candidate in instructions[start_index:]:
+                for register, result_index in tuple(result_indexes.items()):
+                    if instruction_reads_register(candidate, register):
+                        highest = max(highest, result_index)
+
+                if candidate.op.name == "RETURN" and candidate.b == 0:
+                    result_index = result_indexes.get(candidate.a)
+                    if result_index is not None:
+                        highest = max(highest, result_index)
+
+                if candidate.op.name == "MOVE":
+                    source_index = result_indexes.get(candidate.b)
+                    result_indexes.pop(candidate.a, None)
+                    if source_index is not None:
+                        result_indexes[candidate.a] = source_index
+                    continue
+
+                for register in tuple(result_indexes):
+                    if instruction_writes_register(candidate, register):
+                        result_indexes.pop(register, None)
+                if not result_indexes:
+                    break
+            return highest + 1
 
         def future_register_read_count(start_index: int, reg_id: int) -> int:
             count = 0
@@ -2229,13 +2460,21 @@ def decompile_proto(
             for reg_id in sorted(reads):
                 table = table_literals.get(reg_id)
                 current_index = pc_to_index.get(insn.pc)
+                future_reads = (
+                    future_table_read_count(current_index + 1, table)
+                    if table is not None and current_index is not None
+                    else 0
+                )
                 if (
                     table is not None
                     and not table.materialized
                     and reg_id not in pending_table_locals
                     and current_index is not None
                     and (name != "MOVE" or table.render() != "{}")
-                    and future_table_read_count(current_index + 1, table) > 0
+                    and requires_materialization(
+                        value_for(reg_id, insn.pc),
+                        future_reads + 1,
+                    )
                 ):
                     materialize_table_reg(reg_id, indent)
                     continue
@@ -3521,9 +3760,10 @@ def decompile_proto(
             open_results = None
             emit_line(indent, f"if {condition_chain_source([first_condition, next_condition], 'or')} then")
             emit_range(body_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc)
+            branch_value_state = value_state
             emit_line(indent, "end")
             restore_state(branch_saved)
-            restore_state(saved)
+            restore_merged_state(saved, end_pc, branch_value_state)
             return end_index
 
         index = start_index
@@ -3532,6 +3772,7 @@ def decompile_proto(
             if stop_pc is not None and insn.pc >= stop_pc:
                 break
 
+            current_definition_pc = insn.pc
             name = insn.op.name
             finalize_pending_table_reads(insn, indent)
             if name in {"FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT"}:
@@ -4060,22 +4301,31 @@ def decompile_proto(
 
                     saved_regs = dict(regs)
                     saved_tables = clone_tables()
+                    saved_materialized_call_results = dict(materialized_call_results)
+                    saved_value_state = value_state
                     open_results = None
                     emit_line(indent, f"if {condition} then")
                     emit_range(body_index, branch_stop_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
+                    then_value_state = value_state
+                    else_value_state = saved_value_state
                     if has_else:
                         regs = dict(saved_regs)
-                        table_literals = {
-                            reg_id: TableLiteral(dict(table.array), list(table.fields), table.materialized, list(table.writes))
-                            for reg_id, table in saved_tables.items()
-                        }
+                        table_literals = clone_table_map(saved_tables)
+                        materialized_call_results = dict(saved_materialized_call_results)
+                        value_state = saved_value_state
                         open_results = None
                         if not emit_elseif_chain(else_index, end_pc):
                             emit_line(indent, "else")
                             emit_range(else_index, end_pc, indent + 1, loop_continue_pc, loop_exit_pc, end_pc)
+                        else_value_state = value_state
                     emit_line(indent, "end")
                     regs = saved_regs
                     table_literals = saved_tables
+                    materialized_call_results = saved_materialized_call_results
+                    value_state = merge_states(
+                        end_pc,
+                        (then_value_state, else_value_state),
+                    )
                     open_results = None
                     index = pc_to_index.get(end_pc, len(instructions))
                     continue
@@ -4087,21 +4337,27 @@ def decompile_proto(
                 emit_line(indent, f"-- pc {insn.pc}: encoded or unsupported opcode {insn.op.code} raw=0x{insn.word:08x}")
             elif name == "GETIMPORT" and insn.aux is not None:
                 set_reg(insn.a, _import_path_expr(proto, insn.aux))
+                set_value_version(insn.a, insn.pc, read_value(insn.pc, "import"))
             elif name == "GETGLOBAL" and insn.aux is not None:
                 key = proto.constant_text(insn.aux) or f"K{insn.aux}"
                 set_reg(insn.a, _global_expr(key))
+                set_value_version(insn.a, insn.pc, read_value(insn.pc, "global"))
             elif name == "SETGLOBAL" and insn.aux is not None:
                 key = proto.constant_text(insn.aux) or f"K{insn.aux}"
                 open_results = None
                 emit_line(indent, _assignment_source(_global_expr(key), reg(insn.a)))
             elif name == "LOADK":
                 set_reg_or_declare_local(insn.a, _literal(proto, insn.d), insn.next_pc, indent)
+                set_value_version(insn.a, insn.pc, constant_value(insn.d, insn.pc))
             elif name == "LOADKX" and insn.aux is not None:
                 set_reg_or_declare_local(insn.a, _literal(proto, insn.aux), insn.next_pc, indent)
+                set_value_version(insn.a, insn.pc, constant_value(insn.aux, insn.pc))
             elif name == "LOADN":
                 set_reg_or_declare_local(insn.a, str(insn.d), insn.next_pc, indent)
+                set_value_version(insn.a, insn.pc, LiteralValue(insn.pc, insn.d))
             elif name == "LOADB":
                 set_reg_or_declare_local(insn.a, "true" if insn.b else "false", insn.next_pc, indent)
+                set_value_version(insn.a, insn.pc, LiteralValue(insn.pc, bool(insn.b)))
                 if insn.c:
                     target_index = pc_to_index.get(insn.jump_target)
                     if target_index is not None and (stop_pc is None or instructions[target_index].pc < stop_pc):
@@ -4110,11 +4366,27 @@ def decompile_proto(
             elif name == "LOADNIL":
                 if is_generic_for_nil_state_setup(index):
                     set_reg(insn.a, "nil")
+                    set_value_version(insn.a, insn.pc, LiteralValue(insn.pc, None))
                     index += 1
                     continue
                 set_reg_or_declare_local(insn.a, "nil", insn.next_pc, indent)
+                set_value_version(insn.a, insn.pc, LiteralValue(insn.pc, None))
             elif name == "MOVE":
-                if not alias_table_reg(insn.a, insn.b, insn.next_pc, indent):
+                source_value = value_for(insn.b, insn.pc)
+                if isinstance(source_value, CallResultValue) and source_value.group.is_open:
+                    storages = materialize_open_call_result(
+                        source_value.group,
+                        source_value.result_index + 1,
+                        insn.next_pc,
+                        indent,
+                    )
+                    value = (
+                        storages[source_value.result_index]
+                        if source_value.result_index < len(storages)
+                        else reg(insn.b)
+                    )
+                    set_reg_or_declare_local(insn.a, value, insn.next_pc, indent)
+                elif not alias_table_reg(insn.a, insn.b, insn.next_pc, indent):
                     value = reg(insn.b)
                     debug_name = _debug_local_name(proto, insn.a, insn.next_pc)
                     repeated_expression = value.startswith("function(") or value.rstrip().endswith(")")
@@ -4129,6 +4401,7 @@ def decompile_proto(
                 alias_value_version(insn.a, insn.b, insn.pc)
             elif name == "GETUPVAL":
                 set_reg_or_declare_local(insn.a, _upvalue_name(proto, insn.b, upvalue_names), insn.next_pc, indent)
+                set_value_version(insn.a, insn.pc, read_value(insn.pc, "upvalue"))
             elif name == "SETUPVAL":
                 open_results = None
                 materialize_upvalue_snapshots(index, insn.b, insn.a, indent)
@@ -4136,19 +4409,21 @@ def decompile_proto(
             elif name == "NEWCLOSURE":
                 child = _child_proto(proto, insn.d, protos)
                 if child is not None and closure_captures_register(index, insn.a):
-                    local_name = _debug_local_name(proto, insn.a, insn.next_pc) or child.debugname or f"r{insn.a}"
-                    if not _is_identifier(local_name):
-                        local_name = f"r{insn.a}"
-                    if source_local_count < _DIRECT_LOCAL_BUDGET:
-                        storage = local_name
-                        emit_line(indent, f"local {storage} = nil")
-                        note_direct_locals()
-                    else:
-                        storage = allocate_spill_storage(local_name)
-                        emit_line(indent, f"{storage} = nil")
+                    local_name, storage = recursive_closure_storage(insn, child, indent)
                     set_reg(insn.a, storage)
-                    set_value_version(insn.a, insn.pc, ClosureValue(insn.pc, child.id))
+                    seed = ClosureValue(insn.pc, child.id)
+                    set_value_version(insn.a, insn.pc, seed)
                     child_upvalue_names = closure_upvalue_names(index, child, indent)
+                    set_value_version(
+                        insn.a,
+                        insn.pc,
+                        ClosureValue(
+                            insn.pc,
+                            child.id,
+                            closure_capture_values(index),
+                            seed.identity,
+                        ),
+                    )
                     emit_local_function(
                         indent,
                         local_name,
@@ -4213,23 +4488,29 @@ def decompile_proto(
                     emit_line(indent, f"-- pc {insn.pc}: {insn.disassemble()}")
                     open_results = None
                 if child is not None:
-                    set_value_version(insn.a, insn.pc, ClosureValue(insn.pc, child.id))
+                    set_value_version(
+                        insn.a,
+                        insn.pc,
+                        ClosureValue(insn.pc, child.id, closure_capture_values(index)),
+                    )
             elif name == "DUPCLOSURE":
                 child = _closure_constant_proto(proto, insn.d, protos)
                 if child is not None and closure_captures_register(index, insn.a):
-                    local_name = _debug_local_name(proto, insn.a, insn.next_pc) or child.debugname or f"r{insn.a}"
-                    if not _is_identifier(local_name):
-                        local_name = f"r{insn.a}"
-                    if source_local_count < _DIRECT_LOCAL_BUDGET:
-                        storage = local_name
-                        emit_line(indent, f"local {storage} = nil")
-                        note_direct_locals()
-                    else:
-                        storage = allocate_spill_storage(local_name)
-                        emit_line(indent, f"{storage} = nil")
+                    local_name, storage = recursive_closure_storage(insn, child, indent)
                     set_reg(insn.a, storage)
-                    set_value_version(insn.a, insn.pc, ClosureValue(insn.pc, child.id))
+                    seed = ClosureValue(insn.pc, child.id)
+                    set_value_version(insn.a, insn.pc, seed)
                     child_upvalue_names = closure_upvalue_names(index, child, indent)
+                    set_value_version(
+                        insn.a,
+                        insn.pc,
+                        ClosureValue(
+                            insn.pc,
+                            child.id,
+                            closure_capture_values(index),
+                            seed.identity,
+                        ),
+                    )
                     emit_local_function(
                         indent,
                         local_name,
@@ -4294,7 +4575,11 @@ def decompile_proto(
                     emit_line(indent, f"-- pc {insn.pc}: {insn.disassemble()}")
                     open_results = None
                 if child is not None:
-                    set_value_version(insn.a, insn.pc, ClosureValue(insn.pc, child.id))
+                    set_value_version(
+                        insn.a,
+                        insn.pc,
+                        ClosureValue(insn.pc, child.id, closure_capture_values(index)),
+                    )
             elif name == "CAPTURE":
                 open_results = None
             elif name == "NEWTABLE":
@@ -4354,9 +4639,19 @@ def decompile_proto(
                 field = _field_expr(receiver, key)
                 debug_name = _debug_local_name(proto, insn.a, insn.next_pc)
                 inferred_name = inferred_field_local_name(receiver, key)
-                if debug_name is None and future_register_read_count(index + 1, insn.a) > 0:
+                field_value = ExpressionValue(
+                    insn.pc,
+                    ".",
+                    (value_for(insn.b, insn.pc),),
+                    Effect.READ,
+                )
+                use_count = future_register_read_count(index + 1, insn.a)
+                if debug_name is None and use_count > 0:
                     if not declare_inferred_local(insn.a, inferred_name, field, indent):
-                        if future_register_read_needs_snapshot(index + 1, insn.a):
+                        if (
+                            requires_materialization(field_value, use_count)
+                            or future_register_read_needs_snapshot(index + 1, insn.a)
+                        ):
                             declare_inferred_local(
                                 insn.a,
                                 key if _is_identifier(key) else f"r{insn.a}",
@@ -4370,7 +4665,7 @@ def decompile_proto(
                 set_value_version(
                     insn.a,
                     insn.pc,
-                    ExpressionValue(insn.pc, ".", (value_for(insn.b, insn.pc),), Effect.READ),
+                    field_value,
                 )
             elif name == "GETTABLE":
                 set_reg_or_materialize_expression(
@@ -4467,12 +4762,28 @@ def decompile_proto(
                 key_index = _aux_key_index(name, insn.aux)
                 method = proto.constant_text(key_index) or f"K{key_index}"
                 pending_namecalls[insn.a] = (reg(insn.b), method)
+                set_value_version(
+                    insn.a,
+                    insn.pc,
+                    ExpressionValue(
+                        insn.pc,
+                        f":{method}",
+                        (value_for(insn.b, insn.pc),),
+                        Effect.READ,
+                    ),
+                )
+                alias_value_version(insn.a + 1, insn.b, insn.pc)
                 open_results = None
             elif name == "GETVARARGS":
                 if insn.b == 0:
                     table_literals.pop(insn.a, None)
                     regs[insn.a] = "..."
                     open_results = (insn.a, ["..."])
+                    set_value_version(
+                        insn.a,
+                        insn.pc,
+                        UnknownValue(insn.pc, "open vararg result", proto.id, name),
+                    )
                 elif insn.b >= 2:
                     count = insn.b - 1
                     if count > 1 and declare_multi_result_locals(insn.a, count, "...", insn.next_pc, indent):
@@ -4480,6 +4791,12 @@ def decompile_proto(
                     else:
                         for offset in range(count):
                             set_reg_or_declare_local(insn.a + offset, "...", insn.next_pc, indent)
+                    for offset in range(count):
+                        set_value_version(
+                            insn.a + offset,
+                            insn.pc,
+                            UnknownValue(insn.pc, "fixed vararg result", proto.id, name),
+                        )
                 else:
                     open_results = None
                     emit_line(indent, f"-- pc {insn.pc}: {insn.disassemble()}")
@@ -4498,14 +4815,32 @@ def decompile_proto(
                 result_count = insn.c - 1 if insn.c else 0
                 argument_start = insn.a + (2 if pending else 1)
                 argument_count = max(insn.b - (2 if pending else 1), 0) if insn.b else 0
+                if insn.b:
+                    argument_values = tuple(
+                        value_for(argument_start + offset, insn.pc)
+                        for offset in range(argument_count)
+                    )
+                elif open_results is not None and open_results[0] >= argument_start:
+                    argument_values = tuple(
+                        value_for(register, insn.pc)
+                        for register in range(argument_start, open_results[0] + 1)
+                    )
+                else:
+                    argument_values = ()
                 call_value = CallValue(
                     insn.pc,
                     call_target or call,
-                    (value_for(argument_start + offset, insn.pc) for offset in range(argument_count)),
+                    argument_values,
                 )
                 result_group = CallResultGroup(insn.pc, insn.a, result_count if insn.c else None)
                 call_use_count = future_register_read_count(index + 1, insn.a)
                 call_requires_materialization = requires_materialization(call_value, call_use_count)
+                planned_width = (
+                    result_count
+                    if insn.c
+                    else required_open_result_width(index + 1, result_group)
+                )
+                remember_call_result_group(result_group, call, planned_width)
                 open_results = None
                 if insn.c == 0:
                     table_literals.pop(insn.a, None)
@@ -4598,6 +4933,20 @@ def decompile_proto(
                     if insn is not last_instruction:
                         emit_line(indent, "return")
                 else:
+                    open_groups: dict[str, tuple[CallResultGroup, int]] = {}
+                    for offset in range(insn.b - 1):
+                        result = value_for(insn.a + offset, insn.pc)
+                        if not isinstance(result, CallResultValue) or not result.group.is_open:
+                            continue
+                        identity = result.group.identity or (
+                            f"call-results@{result.group.source_pc}:{result.group.base_register}"
+                        )
+                        previous = open_groups.get(identity)
+                        width = result.result_index + 1
+                        if previous is None or width > previous[1]:
+                            open_groups[identity] = (result.group, width)
+                    for group, width in open_groups.values():
+                        materialize_open_call_result(group, width, insn.pc, indent)
                     open_results = None
                     values = [return_reg(insn.a + offset, insn.pc) for offset in range(insn.b - 1)]
                     emit_line(indent, f"return {', '.join(values)}")

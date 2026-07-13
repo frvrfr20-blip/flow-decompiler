@@ -4174,6 +4174,7 @@ def decompile_proto(
                     open_results = None
                     values = [return_reg(insn.a + offset, insn.pc) for offset in range(insn.b - 1)]
                     emit_line(indent, f"return {', '.join(values)}")
+                break
             elif name in {"JUMP", "JUMPX"}:
                 open_results = None
                 target = insn.jump_target

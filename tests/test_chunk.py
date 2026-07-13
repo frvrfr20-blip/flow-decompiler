@@ -812,6 +812,40 @@ def make_global_assign_chunk():
     return bytes(out)
 
 
+def make_return_then_dead_global_chunk():
+    strings = ["deadValue"]
+    words = [
+        encode_ad("LOADN", 0, -1),
+        encode_abc("RETURN", 0, 2, 0),
+        encode_ad("LOADN", 0, 99),
+        encode_abc("SETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_udata_field_call_chunk():
     strings = ["print", "obj", "Name"]
     words = [
@@ -10079,6 +10113,13 @@ class ChunkTests(unittest.TestCase):
 
     def test_non_parenthesized_statement_needs_no_separator(self):
         self.assertFalse(_needs_statement_separator("    r9:Add()", "    ", "state.active = true"))
+
+    def test_decompile_stops_current_range_after_return(self):
+        source = decompile_chunk(parse_chunk(make_return_then_dead_global_chunk()))
+
+        self.assertIn("return -1", source)
+        self.assertNotIn("deadValue", source)
+        self.assertNotIn("99", source)
 
     def test_live_roblox_encoded_opcode_chunk_is_preserved(self):
         raw = base64.b64decode("CQMAAAEAAAABAgACowAAAIIAAQAAAAEAARgAAAEAAAAAAA==")

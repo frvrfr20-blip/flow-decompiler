@@ -9,6 +9,7 @@ from luau_decompiler.decompile import (
     _call_expr,
     _field_expr,
     _index_expr,
+    _is_loop_continue_target,
     _namecall_expr,
     _needs_statement_separator,
     decompile_chunk,
@@ -10123,6 +10124,12 @@ class ChunkTests(unittest.TestCase):
         self.assertIn("return -1", source)
         self.assertNotIn("deadValue", source)
         self.assertNotIn("99", source)
+
+    def test_branch_join_is_not_continue_without_loop_context(self):
+        self.assertFalse(_is_loop_continue_target(20, 20, None))
+
+    def test_loop_range_stop_can_be_continue_with_loop_context(self):
+        self.assertTrue(_is_loop_continue_target(20, 20, 10))
 
     def test_live_roblox_encoded_opcode_chunk_is_preserved(self):
         raw = base64.b64decode("CQMAAAEAAAABAgACowAAAIIAAQAAAAEAARgAAAEAAAAAAA==")

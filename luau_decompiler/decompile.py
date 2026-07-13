@@ -576,6 +576,12 @@ def _needs_statement_separator(previous: str, indent: str, current: str) -> bool
     return not stripped.endswith(("then", "do", "else", "{", "(", "[", ",", ";"))
 
 
+def _is_loop_continue_target(target: int | None, stop_pc: int | None, loop_continue_pc: int | None) -> bool:
+    if target is None or loop_continue_pc is None:
+        return False
+    return target == loop_continue_pc or (stop_pc is not None and target == stop_pc)
+
+
 def decompile_proto(
     proto: Proto,
     protos: list[Proto] | None = None,
@@ -4191,9 +4197,7 @@ def decompile_proto(
                     if stop_pc is not None and stop_pc in pc_to_index:
                         index = pc_to_index[stop_pc]
                         continue
-                if target is not None and (
-                    target == loop_continue_pc or (stop_pc is not None and target == stop_pc)
-                ):
+                if _is_loop_continue_target(target, stop_pc, loop_continue_pc):
                     emit_line(indent, "continue")
                     if stop_pc is not None and stop_pc in pc_to_index:
                         index = pc_to_index[stop_pc]

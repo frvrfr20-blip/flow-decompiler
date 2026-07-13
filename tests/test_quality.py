@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 from pathlib import Path
@@ -82,6 +82,9 @@ class CompilerQualityTests(unittest.TestCase):
             with patch(
                 "luau_decompiler.quality_cli.check_luau_syntax",
                 return_value=SyntaxResult(False, "bad syntax"),
+            ), patch(
+                "luau_decompiler.quality_cli._resolve_compiler",
+                return_value=Path("luau-compile"),
             ), redirect_stdout(stdout):
                 result = main([str(path), "--compiler", "luau-compile", "--json", "--fail-on-syntax"])
 
@@ -100,6 +103,15 @@ class CompilerQualityTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(json.loads(stdout.getvalue())["samples_total"], 1)
+
+    def test_quality_cli_rejects_missing_compiler_before_analysis(self):
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            main(["sample.b64", "--compiler", "definitely-missing-luau-compile"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("compiler was not found", stderr.getvalue())
 
 
 if __name__ == "__main__":

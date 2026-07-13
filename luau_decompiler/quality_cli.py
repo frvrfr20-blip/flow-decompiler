@@ -3,11 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
 
 from .quality import QualityReport, analyze_corpus, check_luau_syntax
 
 
 CORPUS_SUFFIXES = {".b64", ".base64", ".luauc"}
+
+
+def _resolve_compiler(value: Path) -> Path | None:
+    if value.is_file():
+        return value.resolve()
+    command = shutil.which(str(value))
+    return Path(command) if command else None
 
 
 def _collect_paths(roots: list[Path]) -> list[Path]:
@@ -51,10 +59,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     syntax_checker = None
     if args.compiler is not None:
-        syntax_checker = lambda source: check_luau_syntax(source, args.compiler)
+        compiler = _resolve_compiler(args.compiler)
+        if compiler is None:
+            parser.error(f"compiler was not found: {args.compiler}")
+        syntax_checker = lambda source: check_luau_syntax(source, compiler)
     report = analyze_corpus(_collect_paths(args.roots), syntax_checker)
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))

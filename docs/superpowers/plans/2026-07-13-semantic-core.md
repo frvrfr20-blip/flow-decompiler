@@ -309,7 +309,7 @@ Cover while, repeat, numeric for, generic for, nested break, nested continue, an
 
 - [ ] **Step 5: Implement loop regions and edge roles**
 
-Build loop regions from natural-loop facts plus opcode families. Normalize `FORNPREP`/`FORNLOOP` and `FORGPREP*`/`FORGLOOP` shapes when prep/latch edges are not represented as ordinary natural loops. Bind the visible numeric induction value `R[A+3]` while rendering the body; the existing start/limit/step layout (`R[A+2]`, `R[A]`, `R[A+1]`) is already correct. Classify edges from membership and dominance rather than distance.
+Build loop regions from natural-loop facts plus opcode families. Normalize `FORNPREP`/`FORNLOOP` and `FORGPREP*`/`FORGLOOP` shapes when prep/latch edges are not represented as ordinary natural loops. Bind the numeric current/start register `R[A+2]` as the visible induction variable while rendering the body; generic-for result variables begin at `R[A+3]`. The existing numeric limit/step layout (`R[A]`, `R[A+1]`) is already correct. Classify edges from membership and dominance rather than distance.
 
 - [ ] **Step 6: Integrate facts into `decompile_proto`**
 

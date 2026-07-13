@@ -110,7 +110,7 @@ git commit -m "Add Luau differential correctness harness"
 
 - [ ] **Step 1: Write failing predecessor, reachability, and dominance tests**
 
-Construct a diamond graph and assert predecessors, entry dominance, nearest common post-dominator, and exclusion of an unreachable block.
+Construct a diamond graph and assert predecessors, entry dominance, nearest common post-dominator, and exclusion of an unreachable block. Post-dominance must be conservative across infinite paths: a cyclic region that can either repeat forever or exit must not manufacture the exit as a mandatory join.
 
 - [ ] **Step 2: Verify RED**
 
@@ -157,7 +157,7 @@ Cover a single natural loop, nested loop, two-entry SCC, terminal-only graph, em
 
 - [ ] **Step 5: Implement back edges, natural loops, SCC entries, and O(1) lookup**
 
-A back edge exists only when the header dominates the latch. Build natural-loop nodes by walking predecessors. Mark an SCC irreducible when more than one member receives an edge from outside. Cache start-PC and instruction-PC maps in `ControlFlowGraph` without changing public behavior.
+A back edge exists only when the header dominates the latch. Build natural-loop nodes by walking predecessors. Mark an SCC irreducible when more than one member receives an edge from outside. Cache start-PC and instruction-PC maps in `ControlFlowGraph` without changing public behavior, including mutations to the public block and instruction lists.
 
 - [ ] **Step 6: Verify and commit**
 

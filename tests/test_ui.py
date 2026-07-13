@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import queue
 import unittest
 
 from luau_decompiler.ui import (
@@ -139,7 +140,13 @@ class UiInputStateTests(unittest.TestCase):
         app.output_is_result = True
         app.path = Path("large.b64")
         app.input_text = ""
-        app._set_busy = lambda _busy, status: app.status.set(status)
+        busy_states = []
+
+        def set_busy(busy, status):
+            busy_states.append((busy, status))
+            app.status.set(status)
+
+        app._set_busy = set_busy
         text = "x" * (OUTPUT_INSERT_CHUNK_SIZE + 17)
 
         app._insert_output_chunk(7, text, 0, "large.b64", "decompile")
@@ -152,6 +159,45 @@ class UiInputStateTests(unittest.TestCase):
         self.assertFalse(app.output_is_result)
         self.assertEqual(app.file_label.value, "No file selected")
         self.assertEqual(app.status.value, "Cleared")
+        self.assertEqual(busy_states, [(False, "Cleared")])
+
+    def test_stale_output_chunk_does_not_change_new_render_guard(self):
+        app = FlowDecompilerApp.__new__(FlowDecompilerApp)
+        app.render_token = 8
+        app.updating_output = True
+
+        app._insert_output_chunk(7, "old", 0, "old.b64", "decompile")
+
+        self.assertTrue(app.updating_output)
+
+    def test_poll_drains_late_worker_result_after_clear(self):
+        class Root:
+            def __init__(self):
+                self.callbacks = []
+
+            def after(self, _delay, callback):
+                self.callbacks.append(callback)
+
+        class Loader:
+            running = False
+
+        app = FlowDecompilerApp.__new__(FlowDecompilerApp)
+        app.root = Root()
+        app.loader = Loader()
+        app.render_queue = queue.Queue()
+        app.render_workers = {7}
+        app.render_token = 8
+
+        app._poll_render()
+        self.assertEqual(len(app.root.callbacks), 1)
+
+        app.render_queue.put((7, "stale", None, "old.b64", "decompile"))
+        app.render_workers.clear()
+        app.root.callbacks.pop(0)()
+        self.assertTrue(app.render_queue.empty())
+
+        app.root.callbacks.pop(0)()
+        self.assertEqual(app.root.callbacks, [])
 
 
 if __name__ == "__main__":

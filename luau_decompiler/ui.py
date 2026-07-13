@@ -323,6 +323,7 @@ class FlowDecompilerApp:
         self.file_label = tk.StringVar(value=self.path.name if self.path else "No file selected")
         self.mode_buttons: dict[str, tk.Button] = {}
         self.render_queue: queue.Queue[tuple[int, str, str | None, str, str]] = queue.Queue()
+        self.render_workers: set[int] = set()
         self.render_token = 0
         self.settings: FlowSettings = load_settings()
         self.settings_window: tk.Toplevel | None = None
@@ -656,6 +657,7 @@ class FlowDecompilerApp:
         mode = self.mode.get()
         self._set_busy(True, f"{state.label} -> {mode}")
 
+        self.render_workers.add(token)
         thread = threading.Thread(target=self._render_worker, args=(token, state.source, state.label, mode), daemon=True)
         thread.start()
         self.root.after(40, self._poll_render)
@@ -666,12 +668,14 @@ class FlowDecompilerApp:
             self.render_queue.put((token, output, None, label, mode))
         except Exception as exc:
             self.render_queue.put((token, "", str(exc), label, mode))
+        finally:
+            self.render_workers.discard(token)
 
     def _poll_render(self) -> None:
         try:
             token, output, error, filename, mode = self.render_queue.get_nowait()
         except queue.Empty:
-            if self.loader.running:
+            if self.loader.running or self.render_workers:
                 self.root.after(40, self._poll_render)
             return
 
@@ -698,7 +702,6 @@ class FlowDecompilerApp:
         mode: str,
     ) -> None:
         if token != self.render_token:
-            self.updating_output = False
             return
 
         end = min(offset + OUTPUT_INSERT_CHUNK_SIZE, len(output))

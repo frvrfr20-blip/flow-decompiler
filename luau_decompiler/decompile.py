@@ -562,6 +562,18 @@ def _aux_key_index(opname: str, aux: int) -> int:
     return aux
 
 
+def _needs_statement_separator(previous: str, indent: str, current: str) -> bool:
+    if not current.startswith("("):
+        return False
+    previous_indent = previous[: len(previous) - len(previous.lstrip())]
+    if previous_indent != indent:
+        return False
+    stripped = previous.strip()
+    if not stripped or stripped.startswith("--"):
+        return False
+    return not stripped.endswith(("then", "do", "else", "{", "(", "[", ",", ";"))
+
+
 def decompile_proto(
     proto: Proto,
     protos: list[Proto] | None = None,
@@ -600,7 +612,10 @@ def decompile_proto(
         prefix = "    " * indent
         if value == "end" and lines and lines[-1] == f"{prefix}else":
             lines.pop()
-        for line in value.splitlines() or [""]:
+        value_lines = value.splitlines() or [""]
+        if lines and _needs_statement_separator(lines[-1], prefix, value_lines[0]):
+            lines[-1] += ";"
+        for line in value_lines:
             lines.append(f"{prefix}{line}")
 
     def emit_local_function(

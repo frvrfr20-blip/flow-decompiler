@@ -10,6 +10,7 @@ from luau_decompiler.decompile import (
     _field_expr,
     _index_expr,
     _namecall_expr,
+    _needs_statement_separator,
     decompile_chunk,
 )
 from luau_decompiler.disasm import encode_abc, encode_ad, encode_e
@@ -10066,6 +10067,18 @@ class ChunkTests(unittest.TestCase):
 
     def test_boolean_receiver_is_grouped_for_field(self):
         self.assertEqual(_field_expr("true", "value"), "(true).value")
+
+    def test_parenthesized_assignment_after_call_needs_separator(self):
+        self.assertTrue(_needs_statement_separator("    r9:Add()", "    ", "(state or fallback).active = true"))
+
+    def test_parenthesized_call_after_call_needs_separator(self):
+        self.assertTrue(_needs_statement_separator("    r9:Add()", "    ", "((state or fallback).Leaving):Fire()"))
+
+    def test_parenthesized_statement_at_new_indent_does_not_modify_parent(self):
+        self.assertFalse(_needs_statement_separator("if ready then", "    ", "(state).active = true"))
+
+    def test_non_parenthesized_statement_needs_no_separator(self):
+        self.assertFalse(_needs_statement_separator("    r9:Add()", "    ", "state.active = true"))
 
     def test_live_roblox_encoded_opcode_chunk_is_preserved(self):
         raw = base64.b64decode("CQMAAAEAAAABAgACowAAAIIAAQAAAAEAARgAAAEAAAAAAA==")

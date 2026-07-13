@@ -1,4 +1,6 @@
+import time
 import unittest
+from collections.abc import Mapping
 
 from luau_decompiler.cfg import (
     BasicBlock,
@@ -111,6 +113,23 @@ class CfgTests(unittest.TestCase):
         self.assertEqual(facts.back_edges, ((3, 3),))
         self.assertEqual(facts.loops, (LoopInfo(3, 3, frozenset({3}), ()),))
 
+    def test_analyze_cfg_keeps_post_dominators_conservative_at_non_exiting_boundary(self):
+        graph = ControlFlowGraph(
+            [
+                BasicBlock(0, 0, [], [1]),
+                BasicBlock(1, 1, [], [3, 5]),
+                BasicBlock(2, 2, [], [2]),
+                BasicBlock(3, 3, [], []),
+                BasicBlock(4, 4, [], [0, 3]),
+                BasicBlock(5, 5, [], [0, 1, 2, 3]),
+            ]
+        )
+
+        facts = analyze_cfg(graph)
+
+        self.assertEqual(facts.post_dominators[4], frozenset({4}))
+        self.assertIsNone(facts.immediate_post_dominator[4])
+
     def test_analyze_cfg_handles_terminal_only_and_empty_graphs(self):
         terminal_facts = analyze_cfg(ControlFlowGraph([BasicBlock(0, 0, [], [])]))
         empty_facts = analyze_cfg(ControlFlowGraph([]))
@@ -124,6 +143,96 @@ class CfgTests(unittest.TestCase):
         self.assertEqual(empty_facts.predecessors, {})
         self.assertEqual(empty_facts.reachable, frozenset())
         self.assertEqual(empty_facts.components, ())
+
+    def test_analyze_cfg_exposes_read_only_mapping_facts(self):
+        facts = analyze_cfg(ControlFlowGraph([BasicBlock(0, 0, [], [])]))
+
+        for name in (
+            "predecessors",
+            "dominators",
+            "post_dominators",
+            "immediate_dominator",
+            "immediate_post_dominator",
+        ):
+            mapping = getattr(facts, name)
+            self.assertIsInstance(mapping, Mapping)
+            self.assertEqual(dict(mapping), mapping)
+            with self.assertRaises(TypeError):
+                mapping[0] = None
+
+    def test_cfg_block_at_observes_list_mutations(self):
+        original = BasicBlock(0, 0, [], [])
+        graph = ControlFlowGraph([original])
+        appended = BasicBlock(1, 1, [], [])
+        replacement = BasicBlock(2, 2, [], [])
+
+        graph.blocks.append(appended)
+        self.assertIs(graph.block_at(1), appended)
+
+        graph.blocks.remove(appended)
+        with self.assertRaises(KeyError):
+            graph.block_at(1)
+
+        graph.blocks[0] = replacement
+        self.assertIs(graph.block_at(2), replacement)
+        with self.assertRaises(KeyError):
+            graph.block_at(0)
+
+        reassigned = BasicBlock(3, 3, [], [])
+        graph.blocks = [reassigned]
+        self.assertIs(graph.block_at(3), reassigned)
+        with self.assertRaises(KeyError):
+            graph.block_at(2)
+
+    def test_cfg_block_at_observes_block_start_pc_changes(self):
+        block = BasicBlock(0, 0, [], [])
+        graph = ControlFlowGraph([block])
+
+        block.start_pc = 7
+
+        self.assertIs(graph.block_at(7), block)
+        with self.assertRaises(KeyError):
+            graph.block_at(0)
+
+    def test_cfg_instruction_pc_index_maps_decoded_words_and_excludes_aux_words(self):
+        cfg = build_cfg(
+            decode_words(
+                [
+                    encode_ad("JUMPXEQKS", 0, 3),
+                    0,
+                    encode_abc("LOADNIL", 1, 0, 0),
+                    encode_abc("RETURN", 1, 2, 0),
+                ]
+            )
+        )
+
+        self.assertIs(cfg._blocks_by_instruction_pc[0], cfg.block_at(0))
+        self.assertIs(cfg._blocks_by_instruction_pc[2], cfg.block_at(2))
+        self.assertIs(cfg._blocks_by_instruction_pc[3], cfg.block_at(2))
+        self.assertNotIn(1, cfg._blocks_by_instruction_pc)
+
+    def test_analyze_cfg_handles_large_linear_graph_within_budget(self):
+        node_count = 2_000
+        graph = ControlFlowGraph(
+            [
+                BasicBlock(node, node, [], [node + 1] if node + 1 < node_count else [])
+                for node in range(node_count)
+            ]
+        )
+
+        started = time.perf_counter()
+        facts = analyze_cfg(graph)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 15.0)
+        self.assertEqual(facts.immediate_dominator[node_count - 1], node_count - 2)
+        self.assertEqual(facts.immediate_post_dominator[0], 1)
+        self.assertEqual(len(facts.components), node_count)
+        self.assertEqual(facts.components[0], StrongComponent((0,), (), False))
+        self.assertEqual(
+            facts.components[-1],
+            StrongComponent((node_count - 1,), (node_count - 1,), False),
+        )
 
     def test_cfg_splits_jump_targets_and_fallthrough(self):
         words = [

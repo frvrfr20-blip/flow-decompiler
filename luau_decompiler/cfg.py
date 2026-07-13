@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
+import weakref
 
 from .disasm import Instruction
 
@@ -11,6 +14,95 @@ class BasicBlock:
     end_pc: int
     instructions: list[Instruction]
     successors: list[int]
+    _observers: list[weakref.ReferenceType[ControlFlowGraph]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        previous = getattr(self, name, None)
+        object.__setattr__(self, name, value)
+        if name == "start_pc" and "_observers" in self.__dict__ and previous != value:
+            observers: list[weakref.ReferenceType[ControlFlowGraph]] = []
+            for observer in self._observers:
+                graph = observer()
+                if graph is not None:
+                    graph._mark_indexes_dirty()
+                    observers.append(observer)
+            object.__setattr__(self, "_observers", observers)
+
+    def _register_graph(self, graph: ControlFlowGraph) -> None:
+        if not any(observer() is graph for observer in self._observers):
+            self._observers.append(weakref.ref(graph))
+
+    def _unregister_graph(self, graph: ControlFlowGraph) -> None:
+        self._observers = [
+            observer
+            for observer in self._observers
+            if observer() is not None and observer() is not graph
+        ]
+
+
+class _BlockList(list[BasicBlock]):
+    def __init__(self, values: list[BasicBlock], changed: Callable[[], None]) -> None:
+        super().__init__(values)
+        self._changed = changed
+
+    def _did_change(self) -> None:
+        self._changed()
+
+    def append(self, value: BasicBlock) -> None:
+        super().append(value)
+        self._did_change()
+
+    def extend(self, values: object) -> None:
+        super().extend(values)
+        self._did_change()
+
+    def insert(self, index: int, value: BasicBlock) -> None:
+        super().insert(index, value)
+        self._did_change()
+
+    def pop(self, index: int = -1) -> BasicBlock:
+        value = super().pop(index)
+        self._did_change()
+        return value
+
+    def remove(self, value: BasicBlock) -> None:
+        super().remove(value)
+        self._did_change()
+
+    def clear(self) -> None:
+        super().clear()
+        self._did_change()
+
+    def reverse(self) -> None:
+        super().reverse()
+        self._did_change()
+
+    def sort(self, *args: object, **kwargs: object) -> None:
+        super().sort(*args, **kwargs)
+        self._did_change()
+
+    def __setitem__(self, index: int | slice, value: object) -> None:
+        super().__setitem__(index, value)
+        self._did_change()
+
+    def __delitem__(self, index: int | slice) -> None:
+        super().__delitem__(index)
+        self._did_change()
+
+    def __iadd__(self, values: object) -> _BlockList:
+        result = super().__iadd__(values)
+        self._did_change()
+        return result
+
+    def __imul__(self, count: int) -> _BlockList:
+        result = super().__imul__(count)
+        self._did_change()
+        return result
 
 
 @dataclass
@@ -18,16 +110,51 @@ class ControlFlowGraph:
     blocks: list[BasicBlock]
     _blocks_by_start_pc: dict[int, BasicBlock] = field(init=False, repr=False)
     _blocks_by_instruction_pc: dict[int, BasicBlock] = field(init=False, repr=False)
+    _observed_blocks: list[BasicBlock] = field(init=False, repr=False, compare=False)
+    _indexes_dirty: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self._blocks_by_start_pc = {block.start_pc: block for block in self.blocks}
-        self._blocks_by_instruction_pc = {
-            instruction.pc: block
-            for block in self.blocks
-            for instruction in block.instructions
-        }
+        object.__setattr__(self, "_blocks_by_start_pc", {})
+        object.__setattr__(self, "_blocks_by_instruction_pc", {})
+        object.__setattr__(self, "_observed_blocks", [])
+        object.__setattr__(self, "_indexes_dirty", True)
+        self.blocks = self.blocks
+        self._refresh_indexes()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "blocks" and "_blocks_by_start_pc" in self.__dict__:
+            value = _BlockList(value, self._blocks_changed)
+        object.__setattr__(self, name, value)
+        if name == "blocks" and "_blocks_by_start_pc" in self.__dict__:
+            self._blocks_changed()
+
+    def _blocks_changed(self) -> None:
+        for block in self._observed_blocks:
+            block._unregister_graph(self)
+        self._observed_blocks = list(self.blocks)
+        for block in self._observed_blocks:
+            block._register_graph(self)
+        self._mark_indexes_dirty()
+
+    def _mark_indexes_dirty(self) -> None:
+        self._indexes_dirty = True
+
+    def _refresh_indexes(self) -> None:
+        if not self._indexes_dirty:
+            return
+
+        blocks_by_start_pc: dict[int, BasicBlock] = {}
+        blocks_by_instruction_pc: dict[int, BasicBlock] = {}
+        for block in self.blocks:
+            blocks_by_start_pc.setdefault(block.start_pc, block)
+            for instruction in block.instructions:
+                blocks_by_instruction_pc.setdefault(instruction.pc, block)
+        self._blocks_by_start_pc = blocks_by_start_pc
+        self._blocks_by_instruction_pc = blocks_by_instruction_pc
+        self._indexes_dirty = False
 
     def block_at(self, pc: int) -> BasicBlock:
+        self._refresh_indexes()
         return self._blocks_by_start_pc[pc]
 
 
@@ -48,18 +175,19 @@ class StrongComponent:
 
 @dataclass(frozen=True)
 class ControlFlowFacts:
-    predecessors: dict[int, tuple[int, ...]]
+    predecessors: Mapping[int, tuple[int, ...]]
     reachable: frozenset[int]
-    dominators: dict[int, frozenset[int]]
-    post_dominators: dict[int, frozenset[int]]
-    immediate_dominator: dict[int, int | None]
-    immediate_post_dominator: dict[int, int | None]
+    dominators: Mapping[int, frozenset[int]]
+    post_dominators: Mapping[int, frozenset[int]]
+    immediate_dominator: Mapping[int, int | None]
+    immediate_post_dominator: Mapping[int, int | None]
     back_edges: tuple[tuple[int, int], ...]
     loops: tuple[LoopInfo, ...]
     components: tuple[StrongComponent, ...]
 
 
 def analyze_cfg(graph: ControlFlowGraph) -> ControlFlowFacts:
+    graph._refresh_indexes()
     nodes = tuple(sorted(graph._blocks_by_start_pc))
     successors = {
         node: tuple(
@@ -91,28 +219,18 @@ def analyze_cfg(graph: ControlFlowGraph) -> ControlFlowFacts:
             pending.extend(successors[node])
 
     dominators = {node: frozenset({node}) for node in nodes}
+    immediate_dominator = {node: None for node in nodes}
     if nodes:
         entry = nodes[0]
-        reachable_nodes = frozenset(reachable)
-        for node in reachable - {entry}:
-            dominators[node] = reachable_nodes
-
-        changed = True
-        while changed:
-            changed = False
-            for node in nodes:
-                if node == entry or node not in reachable:
-                    continue
-                incoming = [
-                    dominators[predecessor]
-                    for predecessor in sorted_predecessors[node]
-                    if predecessor in reachable
-                ]
-                common = set.intersection(*(set(values) for values in incoming)) if incoming else set()
-                updated = frozenset(common | {node})
-                if updated != dominators[node]:
-                    dominators[node] = updated
-                    changed = True
+        reachable_successors = {
+            node: tuple(successor for successor in successors[node] if successor in reachable)
+            for node in reachable
+        }
+        idoms, reverse_postorder = _immediate_dominators(entry, reachable_successors)
+        for node in reverse_postorder[1:]:
+            parent = idoms[node]
+            dominators[node] = dominators[parent] | {node}
+            immediate_dominator[node] = parent
 
     exits = {node for node in nodes if not successors[node]}
     can_exit = set(exits)
@@ -125,57 +243,122 @@ def analyze_cfg(graph: ControlFlowGraph) -> ControlFlowFacts:
                 pending.append(predecessor)
 
     post_dominators = {node: frozenset({node}) for node in nodes}
-    for node in can_exit - exits:
-        post_dominators[node] = frozenset(can_exit)
-
-    changed = True
-    while changed:
-        changed = False
-        for node in nodes:
-            if node not in can_exit or node in exits:
+    immediate_post_dominator = {node: None for node in nodes}
+    if can_exit:
+        virtual_exit = object()
+        blocked = {
+            node
+            for node in can_exit
+            if any(successor not in can_exit for successor in successors[node])
+        }
+        reverse_successors: dict[object, tuple[object, ...]] = {
+            virtual_exit: tuple(sorted(exits | blocked)),
+        }
+        reverse_successors.update(
+            {node: tuple(sorted_predecessors[node]) for node in can_exit}
+        )
+        post_idoms, reverse_postorder = _immediate_dominators(
+            virtual_exit,
+            reverse_successors,
+        )
+        for node in reverse_postorder[1:]:
+            parent = post_idoms[node]
+            if parent is virtual_exit:
                 continue
-            if any(successor not in can_exit for successor in successors[node]):
-                updated = frozenset({node})
-            else:
-                outgoing = [post_dominators[successor] for successor in successors[node]]
-                common = set.intersection(*(set(values) for values in outgoing)) if outgoing else set()
-                updated = frozenset(common | {node})
-            if updated != post_dominators[node]:
-                post_dominators[node] = updated
-                changed = True
+            post_dominators[node] = post_dominators[parent] | {node}
+            immediate_post_dominator[node] = parent
 
     return ControlFlowFacts(
-        predecessors=sorted_predecessors,
+        predecessors=_read_only_mapping(sorted_predecessors),
         reachable=frozenset(reachable),
-        dominators=dominators,
-        post_dominators=post_dominators,
-        immediate_dominator=_immediate_relations(dominators),
-        immediate_post_dominator=_immediate_relations(post_dominators),
+        dominators=_read_only_mapping(dominators),
+        post_dominators=_read_only_mapping(post_dominators),
+        immediate_dominator=_read_only_mapping(immediate_dominator),
+        immediate_post_dominator=_read_only_mapping(immediate_post_dominator),
         back_edges=_back_edges(successors, dominators),
         loops=_natural_loops(successors, sorted_predecessors, dominators),
         components=_strong_components(successors, sorted_predecessors),
     )
 
 
-def _immediate_relations(
-    relations: dict[int, frozenset[int]],
-) -> dict[int, int | None]:
-    immediate: dict[int, int | None] = {}
-    for node, values in relations.items():
-        strict_values = sorted(values - {node})
-        immediate[node] = next(
-            (
-                candidate
-                for candidate in strict_values
-                if not any(
-                    candidate in relations[other]
-                    for other in strict_values
-                    if other != candidate
+def _read_only_mapping(values: Mapping[int, object]) -> Mapping[int, object]:
+    return MappingProxyType(dict(values))
+
+
+def _reverse_postorder(
+    entry: object,
+    successors: Mapping[object, tuple[object, ...]],
+) -> tuple[object, ...]:
+    seen = {entry}
+    postorder: list[object] = []
+    frames: list[tuple[object, int]] = [(entry, 0)]
+
+    while frames:
+        node, successor_index = frames[-1]
+        targets = successors[node]
+        if successor_index == len(targets):
+            postorder.append(node)
+            frames.pop()
+            continue
+        successor = targets[successor_index]
+        frames[-1] = (node, successor_index + 1)
+        if successor not in seen:
+            seen.add(successor)
+            frames.append((successor, 0))
+
+    return tuple(reversed(postorder))
+
+
+def _immediate_dominators(
+    entry: object,
+    successors: Mapping[object, tuple[object, ...]],
+) -> tuple[dict[object, object], tuple[object, ...]]:
+    reverse_postorder = _reverse_postorder(entry, successors)
+    order = {node: index for index, node in enumerate(reverse_postorder)}
+    predecessors = {node: [] for node in reverse_postorder}
+    for node in reverse_postorder:
+        for successor in successors[node]:
+            predecessors[successor].append(node)
+
+    immediate = {entry: entry}
+    changed = True
+    while changed:
+        changed = False
+        for node in reverse_postorder[1:]:
+            incoming = [
+                predecessor
+                for predecessor in predecessors[node]
+                if predecessor in immediate
+            ]
+            if not incoming:
+                continue
+            candidate = incoming[0]
+            for predecessor in incoming[1:]:
+                candidate = _intersect_immediate_dominators(
+                    candidate,
+                    predecessor,
+                    immediate,
+                    order,
                 )
-            ),
-            None,
-        )
-    return immediate
+            if immediate.get(node) != candidate:
+                immediate[node] = candidate
+                changed = True
+
+    return immediate, reverse_postorder
+
+
+def _intersect_immediate_dominators(
+    left: object,
+    right: object,
+    immediate: Mapping[object, object],
+    order: Mapping[object, int],
+) -> object:
+    while left != right:
+        if order[left] > order[right]:
+            left = immediate[left]
+        else:
+            right = immediate[right]
+    return left
 
 
 def _back_edges(
@@ -237,45 +420,56 @@ def _strong_components(
     components: list[StrongComponent] = []
     next_index = 0
 
-    def visit(node: int) -> None:
-        nonlocal next_index
-        indices[node] = next_index
-        low_links[node] = next_index
+    for root in sorted(successors):
+        if root in indices:
+            continue
+
+        indices[root] = next_index
+        low_links[root] = next_index
         next_index += 1
-        stack.append(node)
-        on_stack.add(node)
+        stack.append(root)
+        on_stack.add(root)
+        frames: list[tuple[int, int]] = [(root, 0)]
 
-        for successor in successors[node]:
-            if successor not in indices:
-                visit(successor)
-                low_links[node] = min(low_links[node], low_links[successor])
-            elif successor in on_stack:
-                low_links[node] = min(low_links[node], indices[successor])
+        while frames:
+            node, successor_index = frames[-1]
+            targets = successors[node]
+            if successor_index < len(targets):
+                successor = targets[successor_index]
+                frames[-1] = (node, successor_index + 1)
+                if successor not in indices:
+                    indices[successor] = next_index
+                    low_links[successor] = next_index
+                    next_index += 1
+                    stack.append(successor)
+                    on_stack.add(successor)
+                    frames.append((successor, 0))
+                elif successor in on_stack:
+                    low_links[node] = min(low_links[node], indices[successor])
+                continue
 
-        if low_links[node] != indices[node]:
-            return
-
-        nodes: list[int] = []
-        while True:
-            member = stack.pop()
-            on_stack.remove(member)
-            nodes.append(member)
-            if member == node:
-                break
-        component_nodes = tuple(sorted(nodes))
-        node_set = set(component_nodes)
-        entries = tuple(
-            member
-            for member in component_nodes
-            if any(predecessor not in node_set for predecessor in predecessors[member])
-        )
-        components.append(
-            StrongComponent(component_nodes, entries, len(entries) > 1)
-        )
-
-    for node in sorted(successors):
-        if node not in indices:
-            visit(node)
+            frames.pop()
+            if low_links[node] == indices[node]:
+                component: list[int] = []
+                while True:
+                    member = stack.pop()
+                    on_stack.remove(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                component_nodes = tuple(sorted(component))
+                node_set = set(component_nodes)
+                entries = tuple(
+                    member
+                    for member in component_nodes
+                    if any(predecessor not in node_set for predecessor in predecessors[member])
+                )
+                components.append(
+                    StrongComponent(component_nodes, entries, len(entries) > 1)
+                )
+            if frames:
+                parent, _ = frames[-1]
+                low_links[parent] = min(low_links[parent], low_links[node])
 
     return tuple(sorted(components, key=lambda component: component.nodes))
 

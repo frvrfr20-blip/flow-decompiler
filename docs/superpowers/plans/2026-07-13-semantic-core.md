@@ -283,7 +283,7 @@ Run `python -m unittest tests.test_regions -v`; expect missing-module failure.
 
 - [ ] **Step 3: Implement branch regions**
 
-Only accept a branch when both successors are reachable and their nearest common post-dominator is a valid join. Use immutable records:
+Only accept a joined branch when both successors are reachable and their nearest common post-dominator is a valid join. Represent direct terminal/early-return arms with `join=None` instead of inventing an `else` or claiming ownership of the following fallback block. Use immutable records:
 
 ```python
 @dataclass(frozen=True)
@@ -309,11 +309,11 @@ Cover while, repeat, numeric for, generic for, nested break, nested continue, an
 
 - [ ] **Step 5: Implement loop regions and edge roles**
 
-Build loop regions from natural-loop facts plus opcode families. Classify edges from membership and dominance rather than distance.
+Build loop regions from natural-loop facts plus opcode families. Normalize `FORNPREP`/`FORNLOOP` and `FORGPREP*`/`FORGLOOP` shapes when prep/latch edges are not represented as ordinary natural loops. Bind the visible numeric induction value `R[A+3]` while rendering the body; the existing start/limit/step layout (`R[A+2]`, `R[A]`, `R[A+1]`) is already correct. Classify edges from membership and dominance rather than distance.
 
 - [ ] **Step 6: Integrate facts into `decompile_proto`**
 
-Build CFG/facts/regions once per prototype. Let graph-backed joins and edge roles run before legacy pattern fallbacks. Replace distance-only `break`/`continue` decisions while preserving all outputs already covered by exact tests.
+Build CFG/facts/regions once per prototype. Let graph-backed joins and edge roles run before legacy pattern fallbacks. Replace distance-only `break`/`continue` decisions while preserving all outputs already covered by exact tests. Merge Task 4 `BlockState` predecessors at loop headers/exits so repeat/while loop-carried values are materialized rather than restoring stale pre-loop string expressions.
 
 - [ ] **Step 7: Minimize live evidence regressions**
 
@@ -321,7 +321,7 @@ Create synthetic regression chunks from reducible raw-flow sites in `ClientFX`, 
 
 - [ ] **Step 8: Verify and commit**
 
-Run region/control-flow/chunk tests, the full suite, differential fixtures, and corpus syntax gate. Evidence must not increase. Commit as `Recover control flow from graph regions`.
+Run region/control-flow/chunk tests, the full suite, differential fixtures, live Roblox scratch samples, and corpus syntax gate. `control_flow.luau`, `loops.luau`, and `short_circuit_branches.luau` must join the existing five equivalent fixtures, with no timeout. Evidence must not increase, and the live `DeepEquals` reducible `FORGLOOP` comment should disappear without syntax or runtime regression. Commit as `Recover control flow from graph regions`.
 
 ---
 

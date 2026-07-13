@@ -106,7 +106,11 @@ flow-quality live_samples --compiler C:\path\to\luau-compile.exe --fail-on-synta
 
 The report separates parse failures, unknown instructions, evidence comments, unsupported output, and Luau syntax failures. Explicit `.txt` files remain accepted, while directory scans only include `.b64`, `.base64`, and `.luauc` files so generated reports are not mistaken for bytecode.
 
-The current regression corpus contains 59 valid live captures with 1,206 protos and 76,526 decoded instructions. Flow 0.2.0 produces syntax-valid Luau for all 59, with zero unknown opcodes and zero unsupported comments. Invalid or non-bytecode files are reported separately instead of being hidden.
+The current regression corpus contains 65 valid live captures with 1,591 protos and 99,955 decoded instructions. Flow 0.2.1 produces syntax-valid Luau for all 65, with zero unknown opcodes and zero unsupported comments. Invalid or non-bytecode files are reported separately instead of being hidden.
+
+## Performance
+
+Flow caches repeated control-flow analysis and indexes jump targets once per prototype. On the development test machine, a 21,946-instruction capture dropped from 36.1 seconds to 1.8 seconds. A separate 181 KB capture with 254 prototypes and 16,581 instructions completes in about 3.2 seconds. Large UI results are inserted in chunks so the window remains responsive.
 
 ## Notes
 

@@ -39,6 +39,19 @@ def _failed_result(result) -> bool:
     )
 
 
+def _execution_failure(result: dict[str, object]) -> str | None:
+    failures: list[str] = []
+    for label in ("original", "reconstructed"):
+        process = result[label]
+        if not isinstance(process, dict):
+            continue
+        if process["timed_out"]:
+            failures.append(f"{label} timed out")
+        elif process["returncode"] == -1:
+            failures.append(f"{label} could not run")
+    return "; ".join(failures) or None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     toolchain = LuauToolchain(args.compiler, args.runtime)
@@ -60,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         for result in results:
             if "error" in result:
                 print(f"{result['path']}: error: {result['error']}")
+            elif failure := _execution_failure(result):
+                print(f"{result['path']}: tool execution failed: {failure}")
             elif result["equivalent"]:
                 print(f"{result['path']}: equivalent")
             else:

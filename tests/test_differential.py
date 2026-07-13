@@ -99,7 +99,7 @@ class DifferentialToolchainTests(unittest.TestCase):
         with patch("luau_decompiler.differential.compile_source", return_value=b"bytecode") as compile_run, patch(
             "luau_decompiler.differential.parse_chunk", return_value=chunk
         ) as parse, patch("luau_decompiler.differential.decompile_chunk", return_value="print('same')\n") as decompile, patch(
-            "luau_decompiler.differential.execute_source",
+            "luau_decompiler.differential._execute_path",
             side_effect=[original, reconstructed],
         ) as execute:
             result = check_roundtrip("print('same')\n", self.toolchain)
@@ -110,11 +110,58 @@ class DifferentialToolchainTests(unittest.TestCase):
         compile_run.assert_called_once_with("print('same')\n", self.toolchain)
         parse.assert_called_once_with(b"bytecode")
         decompile.assert_called_once_with(chunk)
-        self.assertEqual(execute.call_args_list[0].args, ("print('same')\n", self.toolchain))
-        self.assertEqual(execute.call_args_list[1].args, ("print('same')\n", self.toolchain))
+        self.assertEqual(execute.call_args_list[0].args[1], self.toolchain)
+        self.assertEqual(execute.call_args_list[1].args[1], self.toolchain)
+        self.assertEqual(execute.call_args_list[0].args[0], execute.call_args_list[1].args[0])
+
+    def test_check_roundtrip_reuses_one_path_for_exact_stderr_comparison(self):
+        chunk = object()
+        execution_paths: list[str] = []
+
+        def completed(args, **_kwargs):
+            execution_paths.append(args[1])
+            return Mock(returncode=1, stdout="", stderr=f"{args[1]}: boom\n")
+
+        with patch("luau_decompiler.differential.compile_source", return_value=b"bytecode"), patch(
+            "luau_decompiler.differential.parse_chunk", return_value=chunk
+        ), patch("luau_decompiler.differential.decompile_chunk", return_value="error('boom')\n"), patch(
+            "luau_decompiler.differential.subprocess.run", side_effect=completed
+        ):
+            result = check_roundtrip("error('boom')\n", self.toolchain)
+
+        self.assertTrue(result.equivalent)
+        self.assertEqual(len(execution_paths), 2)
+        self.assertEqual(execution_paths[0], execution_paths[1])
 
 
 class DifferentialCliTests(unittest.TestCase):
+    def test_repository_fixtures_are_discovered_and_executed(self):
+        fixtures = Path(__file__).parent / "fixtures" / "differential"
+        expected_names = {
+            "control_flow.luau",
+            "multi_return.luau",
+            "closures_tables.luau",
+            "short_circuit_branches.luau",
+            "loops.luau",
+            "varargs_results.luau",
+            "tables_methods.luau",
+            "captures.luau",
+        }
+        original = ProcessResult(0, "ok\n", "")
+        equivalent = compare_results(original, original)
+        stdout = io.StringIO()
+
+        with patch(
+            "luau_decompiler.differential_cli.check_roundtrip",
+            return_value=equivalent,
+        ) as check, redirect_stdout(stdout):
+            result = main([str(fixtures), "--compiler", "luau-compile", "--runtime", "luau", "--json"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual({Path(item["path"]).name for item in payload}, expected_names)
+        self.assertEqual(check.call_count, len(expected_names))
+
     def test_cli_reports_each_directory_fixture_as_json_and_fails_mismatches(self):
         original = ProcessResult(0, "ok\n", "")
         equivalent = compare_results(original, original, "print('ok')\n", "print('ok')\n")
@@ -169,6 +216,37 @@ class DifferentialCliTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertEqual(json.loads(stdout.getvalue()), [{"path": str(fixture), "error": "compiler was not found"}])
+
+    def test_cli_reports_matched_timeouts_before_equivalence_in_text_mode(self):
+        timed_out = ProcessResult(-1, "", "timed out", timed_out=True)
+        equivalent = compare_results(timed_out, timed_out)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = Path(temp_dir) / "fixture.luau"
+            fixture.write_text("print('fixture')\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch("luau_decompiler.differential_cli.check_roundtrip", return_value=equivalent), redirect_stdout(stdout):
+                result = main([str(fixture), "--compiler", "luau-compile", "--runtime", "luau"])
+
+        self.assertEqual(result, 1)
+        self.assertIn("tool execution failed", stdout.getvalue())
+        self.assertIn("timed out", stdout.getvalue())
+        self.assertNotIn("equivalent", stdout.getvalue())
+
+    def test_cli_reports_matched_tool_failures_before_equivalence_in_text_mode(self):
+        failed = ProcessResult(-1, "", "executable not found")
+        equivalent = compare_results(failed, failed)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = Path(temp_dir) / "fixture.luau"
+            fixture.write_text("print('fixture')\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch("luau_decompiler.differential_cli.check_roundtrip", return_value=equivalent), redirect_stdout(stdout):
+                result = main([str(fixture), "--compiler", "luau-compile", "--runtime", "luau"])
+
+        self.assertEqual(result, 1)
+        self.assertIn("tool execution failed", stdout.getvalue())
+        self.assertNotIn("equivalent", stdout.getvalue())
 
     def test_cli_reports_parser_limit_failures_per_fixture(self):
         with tempfile.TemporaryDirectory() as temp_dir:

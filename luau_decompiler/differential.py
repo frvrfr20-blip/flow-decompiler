@@ -82,18 +82,8 @@ def compile_source(source: str, toolchain: LuauToolchain) -> bytes:
     return completed.stdout
 
 
-def execute_source(source: str, toolchain: LuauToolchain) -> ProcessResult:
-    source_path: Path | None = None
+def _execute_path(source_path: Path, toolchain: LuauToolchain) -> ProcessResult:
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".luau",
-            encoding="utf-8",
-            newline="",
-            delete=False,
-        ) as handle:
-            handle.write(source)
-            source_path = Path(handle.name)
         completed = subprocess.run(
             [str(toolchain.runtime), str(source_path)],
             capture_output=True,
@@ -106,14 +96,26 @@ def execute_source(source: str, toolchain: LuauToolchain) -> ProcessResult:
         return ProcessResult(-1, "", str(exc), timed_out=True)
     except OSError as exc:
         return ProcessResult(-1, "", str(exc))
-    finally:
-        if source_path is not None:
-            source_path.unlink(missing_ok=True)
+
+
+def _write_source(source_path: Path, source: str) -> None:
+    source_path.write_text(source, encoding="utf-8", newline="")
+
+
+def execute_source(source: str, toolchain: LuauToolchain) -> ProcessResult:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        source_path = Path(temporary_directory) / "fixture.luau"
+        _write_source(source_path, source)
+        return _execute_path(source_path, toolchain)
 
 
 def check_roundtrip(source: str, toolchain: LuauToolchain) -> DifferentialResult:
     bytecode = compile_source(source, toolchain)
     reconstructed_source = decompile_chunk(parse_chunk(bytecode))
-    original = execute_source(source, toolchain)
-    reconstructed = execute_source(reconstructed_source, toolchain)
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        source_path = Path(temporary_directory) / "fixture.luau"
+        _write_source(source_path, source)
+        original = _execute_path(source_path, toolchain)
+        _write_source(source_path, reconstructed_source)
+        reconstructed = _execute_path(source_path, toolchain)
     return compare_results(original, reconstructed, source, reconstructed_source)

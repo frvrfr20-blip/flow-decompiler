@@ -1,76 +1,43 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import TypeVar, cast
 import weakref
 
 from .disasm import Instruction
 
 
-@dataclass
-class BasicBlock:
-    start_pc: int
-    end_pc: int
-    instructions: list[Instruction]
-    successors: list[int]
-    _observers: list[weakref.ReferenceType[ControlFlowGraph]] = field(
-        default_factory=list,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-
-    def __setattr__(self, name: str, value: object) -> None:
-        previous = getattr(self, name, None)
-        object.__setattr__(self, name, value)
-        if name == "start_pc" and "_observers" in self.__dict__ and previous != value:
-            observers: list[weakref.ReferenceType[ControlFlowGraph]] = []
-            for observer in self._observers:
-                graph = observer()
-                if graph is not None:
-                    graph._mark_indexes_dirty()
-                    observers.append(observer)
-            object.__setattr__(self, "_observers", observers)
-
-    def _register_graph(self, graph: ControlFlowGraph) -> None:
-        if not any(observer() is graph for observer in self._observers):
-            self._observers.append(weakref.ref(graph))
-
-    def _unregister_graph(self, graph: ControlFlowGraph) -> None:
-        self._observers = [
-            observer
-            for observer in self._observers
-            if observer() is not None and observer() is not graph
-        ]
+_Item = TypeVar("_Item")
 
 
-class _BlockList(list[BasicBlock]):
-    def __init__(self, values: list[BasicBlock], changed: Callable[[], None]) -> None:
+class _MutationAwareList(list[_Item]):
+    def __init__(self, values: Iterable[_Item], changed: Callable[[], None]) -> None:
         super().__init__(values)
         self._changed = changed
 
     def _did_change(self) -> None:
         self._changed()
 
-    def append(self, value: BasicBlock) -> None:
+    def append(self, value: _Item) -> None:
         super().append(value)
         self._did_change()
 
-    def extend(self, values: object) -> None:
+    def extend(self, values: Iterable[_Item]) -> None:
         super().extend(values)
         self._did_change()
 
-    def insert(self, index: int, value: BasicBlock) -> None:
+    def insert(self, index: int, value: _Item) -> None:
         super().insert(index, value)
         self._did_change()
 
-    def pop(self, index: int = -1) -> BasicBlock:
+    def pop(self, index: int = -1) -> _Item:
         value = super().pop(index)
         self._did_change()
         return value
 
-    def remove(self, value: BasicBlock) -> None:
+    def remove(self, value: _Item) -> None:
         super().remove(value)
         self._did_change()
 
@@ -94,16 +61,92 @@ class _BlockList(list[BasicBlock]):
         super().__delitem__(index)
         self._did_change()
 
-    def __iadd__(self, values: object) -> _BlockList:
+    def __iadd__(self, values: Iterable[_Item]) -> _MutationAwareList[_Item]:
         result = super().__iadd__(values)
         self._did_change()
         return result
 
-    def __imul__(self, count: int) -> _BlockList:
+    def __imul__(self, count: int) -> _MutationAwareList[_Item]:
         result = super().__imul__(count)
         self._did_change()
         return result
 
+
+@dataclass
+class BasicBlock:
+    start_pc: int
+    end_pc: int
+    instructions: list[Instruction]
+    successors: list[int]
+    _observers: list[weakref.ReferenceType[ControlFlowGraph]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        self.instructions = self.instructions
+
+    def __setattr__(self, name: str, value: object) -> None:
+        previous = getattr(self, name, None)
+        if (
+            name == "instructions"
+            and "_observers" in self.__dict__
+        ):
+            if previous is not value or not isinstance(value, _MutationAwareList):
+                value = _MutationAwareList(
+                    cast(Iterable[Instruction], value),
+                    self._instructions_changed,
+                )
+        object.__setattr__(self, name, value)
+        if (
+            name == "start_pc"
+            and "_observers" in self.__dict__
+            and previous != value
+        ):
+            self._notify_observers()
+        elif (
+            name == "instructions"
+            and "_observers" in self.__dict__
+            and previous is not value
+        ):
+            self._notify_observers()
+
+    def _instructions_changed(self) -> None:
+        self._notify_observers()
+
+    def _notify_observers(self) -> None:
+        observers: list[weakref.ReferenceType[ControlFlowGraph]] = []
+        for observer in self._observers:
+            graph = observer()
+            if graph is not None:
+                graph._mark_indexes_dirty()
+                observers.append(observer)
+        object.__setattr__(self, "_observers", observers)
+
+    def _register_graph(self, graph: ControlFlowGraph) -> None:
+        observers: list[weakref.ReferenceType[ControlFlowGraph]] = []
+        registered = False
+        for observer in self._observers:
+            active_graph = observer()
+            if active_graph is None:
+                continue
+            if active_graph is graph:
+                if registered:
+                    continue
+                registered = True
+            observers.append(observer)
+        if not registered:
+            observers.append(weakref.ref(graph))
+        self._observers = observers
+
+    def _unregister_graph(self, graph: ControlFlowGraph) -> None:
+        self._observers = [
+            observer
+            for observer in self._observers
+            if observer() is not None and observer() is not graph
+        ]
 
 @dataclass
 class ControlFlowGraph:
@@ -122,10 +165,19 @@ class ControlFlowGraph:
         self._refresh_indexes()
 
     def __setattr__(self, name: str, value: object) -> None:
+        previous = getattr(self, name, None)
         if name == "blocks" and "_blocks_by_start_pc" in self.__dict__:
-            value = _BlockList(value, self._blocks_changed)
+            if previous is not value or not isinstance(value, _MutationAwareList):
+                value = _MutationAwareList(
+                    cast(Iterable[BasicBlock], value),
+                    self._blocks_changed,
+                )
         object.__setattr__(self, name, value)
-        if name == "blocks" and "_blocks_by_start_pc" in self.__dict__:
+        if (
+            name == "blocks"
+            and "_blocks_by_start_pc" in self.__dict__
+            and previous is not value
+        ):
             self._blocks_changed()
 
     def _blocks_changed(self) -> None:
@@ -207,6 +259,18 @@ def analyze_cfg(graph: ControlFlowGraph) -> ControlFlowFacts:
         node: tuple(sorted(predecessors[node]))
         for node in nodes
     }
+    components = _strong_components(successors, sorted_predecessors)
+    cyclic_nodes = {
+        node
+        for component in components
+        if len(component.nodes) > 1
+        for node in component.nodes
+    }
+    cyclic_nodes.update(
+        node
+        for node in nodes
+        if node in successors[node]
+    )
 
     reachable: set[int] = set()
     if nodes:
@@ -252,7 +316,7 @@ def analyze_cfg(graph: ControlFlowGraph) -> ControlFlowFacts:
             if any(successor not in can_exit for successor in successors[node])
         }
         reverse_successors: dict[object, tuple[object, ...]] = {
-            virtual_exit: tuple(sorted(exits | blocked)),
+            virtual_exit: tuple(sorted(exits | blocked | (cyclic_nodes & can_exit))),
         }
         reverse_successors.update(
             {node: tuple(sorted_predecessors[node]) for node in can_exit}
@@ -277,7 +341,7 @@ def analyze_cfg(graph: ControlFlowGraph) -> ControlFlowFacts:
         immediate_post_dominator=_read_only_mapping(immediate_post_dominator),
         back_edges=_back_edges(successors, dominators),
         loops=_natural_loops(successors, sorted_predecessors, dominators),
-        components=_strong_components(successors, sorted_predecessors),
+        components=components,
     )
 
 

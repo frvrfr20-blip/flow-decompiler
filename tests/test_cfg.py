@@ -1,3 +1,4 @@
+import gc
 import time
 import unittest
 from collections.abc import Mapping
@@ -130,6 +131,35 @@ class CfgTests(unittest.TestCase):
         self.assertEqual(facts.post_dominators[4], frozenset({4}))
         self.assertIsNone(facts.immediate_post_dominator[4])
 
+    def test_analyze_cfg_treats_cycles_with_exits_as_post_dominance_frontiers(self):
+        self_loop_facts = analyze_cfg(
+            ControlFlowGraph(
+                [
+                    BasicBlock(0, 0, [], [0, 1]),
+                    BasicBlock(1, 1, [], []),
+                ]
+            )
+        )
+        cycle_facts = analyze_cfg(
+            ControlFlowGraph(
+                [
+                    BasicBlock(0, 0, [], [1]),
+                    BasicBlock(1, 1, [], [2, 3]),
+                    BasicBlock(2, 2, [], [1]),
+                    BasicBlock(3, 3, [], []),
+                ]
+            )
+        )
+
+        self.assertEqual(self_loop_facts.post_dominators[0], frozenset({0}))
+        self.assertIsNone(self_loop_facts.immediate_post_dominator[0])
+        self.assertEqual(cycle_facts.post_dominators[1], frozenset({1}))
+        self.assertIsNone(cycle_facts.immediate_post_dominator[1])
+        self.assertEqual(cycle_facts.post_dominators[2], frozenset({2}))
+        self.assertIsNone(cycle_facts.immediate_post_dominator[2])
+        self.assertEqual(cycle_facts.post_dominators[0], frozenset({0, 1}))
+        self.assertEqual(cycle_facts.immediate_post_dominator[0], 1)
+
     def test_analyze_cfg_handles_terminal_only_and_empty_graphs(self):
         terminal_facts = analyze_cfg(ControlFlowGraph([BasicBlock(0, 0, [], [])]))
         empty_facts = analyze_cfg(ControlFlowGraph([]))
@@ -210,6 +240,81 @@ class CfgTests(unittest.TestCase):
         self.assertIs(cfg._blocks_by_instruction_pc[2], cfg.block_at(2))
         self.assertIs(cfg._blocks_by_instruction_pc[3], cfg.block_at(2))
         self.assertNotIn(1, cfg._blocks_by_instruction_pc)
+
+    def test_cfg_instruction_pc_index_observes_all_instruction_list_mutations(self):
+        instructions = decode_words(
+            [
+                encode_abc("RETURN", 0, 1, 0),
+                encode_ad("JUMPXEQKS", 0, 3),
+                0,
+                encode_abc("LOADNIL", 1, 0, 0),
+            ]
+        )
+        cfg = build_cfg([instructions[0]])
+        block = cfg.blocks[0]
+
+        def assert_indexed(*pcs: int) -> None:
+            self.assertTrue(cfg._indexes_dirty)
+            cfg._refresh_indexes()
+            self.assertEqual(set(cfg._blocks_by_instruction_pc), set(pcs))
+            self.assertNotIn(2, cfg._blocks_by_instruction_pc)
+            self.assertFalse(cfg._indexes_dirty)
+
+        self.assertIsInstance(block.instructions, list)
+        block.instructions.append(instructions[1])
+        assert_indexed(0, 1)
+
+        block.instructions.remove(instructions[1])
+        assert_indexed(0)
+
+        block.instructions[0] = instructions[2]
+        assert_indexed(3)
+
+        block.instructions[:] = [instructions[0], instructions[1]]
+        assert_indexed(0, 1)
+
+        block.instructions += [instructions[2]]
+        assert_indexed(0, 1, 3)
+
+        block.instructions *= 0
+        assert_indexed()
+
+        block.instructions = [instructions[1]]
+        assert_indexed(1)
+
+    def test_cfg_prunes_dead_observers_and_keeps_shared_observers_active(self):
+        block = BasicBlock(0, 0, [], [])
+        first = ControlFlowGraph([block])
+        second = ControlFlowGraph([block])
+        instruction = decode_words(
+            [
+                encode_abc("RETURN", 0, 1, 0),
+                encode_abc("LOADNIL", 0, 0, 0),
+            ]
+        )[1]
+
+        self.assertEqual(len(block._observers), 2)
+        block.instructions.append(instruction)
+        self.assertTrue(first._indexes_dirty)
+        self.assertTrue(second._indexes_dirty)
+        first._refresh_indexes()
+        second._refresh_indexes()
+        self.assertIs(first._blocks_by_instruction_pc[1], block)
+        self.assertIs(second._blocks_by_instruction_pc[1], block)
+
+        for _ in range(100):
+            graph = ControlFlowGraph([block])
+            del graph
+        gc.collect()
+        third = ControlFlowGraph([block])
+        self.assertEqual(len(block._observers), 3)
+        self.assertFalse(any(observer() is None for observer in block._observers))
+        del third
+        gc.collect()
+
+        first.blocks = []
+        second.blocks = []
+        self.assertEqual(block._observers, [])
 
     def test_analyze_cfg_handles_large_linear_graph_within_budget(self):
         node_count = 2_000

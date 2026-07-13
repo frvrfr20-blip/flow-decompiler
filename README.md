@@ -89,6 +89,25 @@ Unsupported instructions are left as comments instead of being hidden.
 python -m unittest discover -s tests
 ```
 
+## Quality Report
+
+Run Flow across a directory of raw or base64 chunks:
+
+```powershell
+flow-quality live_samples
+flow-quality live_samples --json
+```
+
+To syntax-check every reconstructed source file with an official Luau compiler:
+
+```powershell
+flow-quality live_samples --compiler C:\path\to\luau-compile.exe --fail-on-syntax
+```
+
+The report separates parse failures, unknown instructions, evidence comments, unsupported output, and Luau syntax failures. Explicit `.txt` files remain accepted, while directory scans only include `.b64`, `.base64`, and `.luauc` files so generated reports are not mistaken for bytecode.
+
+The current regression corpus contains 59 valid live captures with 1,206 protos and 76,526 decoded instructions. Flow 0.2.0 produces syntax-valid Luau for all 59, with zero unknown opcodes and zero unsupported comments. Invalid or non-bytecode files are reported separately instead of being hidden.
+
 ## Notes
 
 This is a source reconstruction tool, not a promise of original source. Decompiled variable names and structure are best-effort unless the bytecode includes debug metadata.

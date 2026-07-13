@@ -1,4 +1,5 @@
 import struct
+import sys
 import unittest
 import base64
 
@@ -2926,6 +2927,92 @@ def make_nested_if_else_return_chunk():
         out += varint(8)
         out.append(reg_id)
     out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_table_literal_numeric_index_chunk():
+    words = [
+        encode_abc("NEWTABLE", 0, 1, 0),
+        2,
+        encode_ad("LOADN", 1, 1),
+        encode_ad("LOADN", 2, 2),
+        encode_abc("SETLIST", 0, 1, 3),
+        1,
+        encode_abc("GETTABLEN", 1, 0, 1),
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_nonterminating_guard_ladder_chunk(depth=24):
+    words = []
+    for _ in range(depth):
+        words.append(encode_ad("JUMPIFNOT", 0, 1))
+        words.append(encode_abc("RETURN", 0, 1, 0))
+    words.append(encode_ad("JUMP", 0, -((depth * 2) + 1)))
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([1, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_long_straight_line_chunk(length=400):
+    words = [encode_abc("NOP", 0, 0, 0) for _ in range(length)]
+    words.append(encode_abc("RETURN", 0, 1, 0))
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([1, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
     out += varint(0)
     return bytes(out)
 
@@ -8502,6 +8589,14 @@ class ChunkTests(unittest.TestCase):
         self.assertNotIn("SETLIST", source)
         self.assertNotIn("SETTABLEKS", source)
 
+    def test_decompile_groups_table_literal_numeric_index_receiver(self):
+        chunk = parse_chunk(make_table_literal_numeric_index_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("return ({1, 2})[2]", source)
+        self.assertNotIn("return {1, 2}[2]", source)
+
     def test_decompile_table_literal_preserves_side_effect_write_order(self):
         chunk = parse_chunk(make_table_side_effect_array_order_chunk())
 
@@ -8878,6 +8973,56 @@ class ChunkTests(unittest.TestCase):
         )
         self.assertNotIn('if b then\n        return "yes"\n    end\n    return "maybe"', source)
         self.assertNotIn("JUMPIFNOT", source)
+
+    def test_decompile_guard_ladder_memoizes_termination_analysis(self):
+        chunk = parse_chunk(make_nonterminating_guard_ladder_chunk(24))
+        analysis_calls = 0
+
+        class AnalysisBudgetExceeded(Exception):
+            pass
+
+        def count_analysis_calls(frame, event, _arg):
+            nonlocal analysis_calls
+            if event != "call" or frame.f_code.co_name != "terminating_range_end_pc":
+                return
+            analysis_calls += 1
+            if analysis_calls > 10_000:
+                raise AnalysisBudgetExceeded
+
+        sys.setprofile(count_analysis_calls)
+        try:
+            try:
+                source = decompile_chunk(chunk)
+            except AnalysisBudgetExceeded:
+                self.fail("termination analysis exceeded its deterministic work budget")
+        finally:
+            sys.setprofile(None)
+
+        self.assertLess(analysis_calls, 1_000)
+        self.assertIn("return", source)
+
+    def test_decompile_straight_line_has_bounded_loop_detection_reads(self):
+        chunk = parse_chunk(make_long_straight_line_chunk(400))
+
+        class InstructionReadBudget(list):
+            def __init__(self, values):
+                super().__init__(values)
+                self.reads = 0
+
+            def __getitem__(self, key):
+                amount = len(range(*key.indices(len(self)))) if isinstance(key, slice) else 1
+                self.reads += amount
+                if self.reads > 20_000:
+                    raise AssertionError("loop detection exceeded its instruction-read budget")
+                return super().__getitem__(key)
+
+        instructions = InstructionReadBudget(chunk.protos[0].instructions)
+        chunk.protos[0].instructions = instructions
+
+        source = decompile_chunk(chunk)
+
+        self.assertLess(instructions.reads, 20_000)
+        self.assertIn("-- Flow Decompiler", source)
 
     def test_decompile_if_expression_local_assignment(self):
         chunk = parse_chunk(make_if_expression_local_chunk())

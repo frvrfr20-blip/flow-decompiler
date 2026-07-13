@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import cache
 import json
 
 from .chunk import BytecodeChunk, Proto, decompose_import_id
@@ -1045,6 +1048,63 @@ def decompile_proto(
     instructions = proto.instructions
     pc_to_index = {insn.pc: index for index, insn in enumerate(instructions)}
     last_instruction = instructions[-1] if instructions else None
+    conditional_jumps_by_target: dict[int, list[int]] = {}
+    jumpbacks_by_target: dict[int, list[int]] = {}
+    for instruction_index, instruction in enumerate(instructions):
+        target = instruction.jump_target
+        if target is None:
+            continue
+        if instruction.op.name in _CONDITIONAL_JUMP_OPS:
+            conditional_jumps_by_target.setdefault(target, []).append(instruction_index)
+        elif instruction.op.name == "JUMPBACK":
+            jumpbacks_by_target.setdefault(target, []).append(instruction_index)
+
+    def targeting_jump_indices(
+        indices_by_target: dict[int, list[int]],
+        target_pc: int,
+        after_index: int,
+        stop_pc: int | None,
+    ) -> Iterator[int]:
+        candidates = indices_by_target.get(target_pc)
+        if not candidates:
+            return
+        position = bisect_right(candidates, after_index)
+        while position < len(candidates):
+            candidate_index = candidates[position]
+            if stop_pc is not None and instructions[candidate_index].pc >= stop_pc:
+                return
+            yield candidate_index
+            position += 1
+
+    @cache
+    def terminating_range_end_pc(start_index: int, limit_pc: int | None) -> int | None:
+        scan = start_index
+        while scan < len(instructions):
+            candidate = instructions[scan]
+            if limit_pc is not None and candidate.pc >= limit_pc:
+                return None
+            if candidate.op.name == "RETURN":
+                return candidate.next_pc
+            if candidate.op.name in _CONDITIONAL_JUMP_OPS:
+                target = candidate.jump_target
+                body_index = pc_to_index.get(candidate.next_pc)
+                target_index = pc_to_index.get(target) if target is not None else None
+                if (
+                    target is not None
+                    and body_index is not None
+                    and target_index is not None
+                    and target > candidate.next_pc
+                ):
+                    then_end_pc = terminating_range_end_pc(body_index, target)
+                    else_end_pc = terminating_range_end_pc(target_index, limit_pc)
+                    if then_end_pc == target and else_end_pc is not None:
+                        return else_end_pc
+                    scan = target_index
+                    continue
+            if candidate.op.name == "JUMP":
+                return None
+            scan += 1
+        return None
 
     def emit_range(
         start_index: int,
@@ -1226,7 +1286,7 @@ def decompile_proto(
                 elif setup.op.name == "GETTABLE":
                     set_reg(setup.a, _index_expr(reg(setup.b), reg(setup.c)))
                 elif setup.op.name == "GETTABLEN":
-                    set_reg(setup.a, f"{reg(setup.b)}[{setup.c + 1}]")
+                    set_reg(setup.a, _index_expr(reg(setup.b), str(setup.c + 1)))
                 else:
                     return index
                 index += 1
@@ -1298,7 +1358,7 @@ def decompile_proto(
                 elif name == "GETTABLE":
                     temp_regs[candidate.a] = _index_expr(temp_reg(candidate.b), temp_reg(candidate.c))
                 elif name == "GETTABLEN":
-                    temp_regs[candidate.a] = f"{temp_reg(candidate.b)}[{candidate.c + 1}]"
+                    temp_regs[candidate.a] = _index_expr(temp_reg(candidate.b), str(candidate.c + 1))
                 elif name in {"NAMECALL", "NAMECALLUDATA"} and candidate.aux is not None:
                     key_index = _aux_key_index(name, candidate.aux)
                     method = proto.constant_text(key_index) or f"K{key_index}"
@@ -1544,35 +1604,6 @@ def decompile_proto(
 
                 mutable_capture_locals[reg_id] = local_name
                 set_reg(reg_id, local_name)
-
-        def terminating_range_end_pc(start_index: int, limit_pc: int | None) -> int | None:
-            scan = start_index
-            while scan < len(instructions):
-                candidate = instructions[scan]
-                if limit_pc is not None and candidate.pc >= limit_pc:
-                    return None
-                if candidate.op.name == "RETURN":
-                    return candidate.next_pc
-                if candidate.op.name in _CONDITIONAL_JUMP_OPS:
-                    target = candidate.jump_target
-                    body_index = pc_to_index.get(candidate.next_pc)
-                    target_index = pc_to_index.get(target) if target is not None else None
-                    if (
-                        target is not None
-                        and body_index is not None
-                        and target_index is not None
-                        and target > candidate.next_pc
-                    ):
-                        then_end_pc = terminating_range_end_pc(body_index, target)
-                        else_end_pc = terminating_range_end_pc(target_index, limit_pc)
-                        if then_end_pc == target and else_end_pc is not None:
-                            return else_end_pc
-                        scan = target_index
-                        continue
-                if candidate.op.name == "JUMP":
-                    return None
-                scan += 1
-            return None
 
         def inferred_service_name(receiver: str, method: str, args: list[str]) -> str | None:
             if receiver != "game" or method != "GetService" or len(args) != 1:
@@ -1991,7 +2022,7 @@ def decompile_proto(
             if name == "GETTABLE":
                 return candidate.a, _index_expr(reg(candidate.b), reg(candidate.c))
             if name == "GETTABLEN":
-                return candidate.a, f"{reg(candidate.b)}[{candidate.c + 1}]"
+                return candidate.a, _index_expr(reg(candidate.b), str(candidate.c + 1))
             return None
 
         def simple_span_assignment_source(candidate, span_regs: dict[int, str]) -> tuple[int, str] | None:
@@ -2022,7 +2053,10 @@ def decompile_proto(
                     span_regs.get(candidate.c, reg(candidate.c)),
                 )
             if name == "GETTABLEN":
-                return candidate.a, f"{span_regs.get(candidate.b, reg(candidate.b))}[{candidate.c + 1}]"
+                return candidate.a, _index_expr(
+                    span_regs.get(candidate.b, reg(candidate.b)),
+                    str(candidate.c + 1),
+                )
             return None
 
         def call_assignment_span_source(start_index: int, stop_pc: int) -> tuple[int, str] | None:
@@ -2109,7 +2143,7 @@ def decompile_proto(
                         return None
                     receiver = span_regs.get(candidate.b, reg(candidate.b))
                     value = span_regs.get(candidate.a, reg(candidate.a))
-                    return candidate.b, f"{receiver}[{candidate.c + 1}]", value
+                    return candidate.b, _index_expr(receiver, str(candidate.c + 1)), value
 
                 value = simple_span_assignment_source(candidate, span_regs)
                 if value is None:
@@ -2746,7 +2780,7 @@ def decompile_proto(
                     elif name == "GETTABLE":
                         temp_regs[candidate.a] = _index_expr(temp_reg(candidate.b), temp_reg(candidate.c))
                     elif name == "GETTABLEN":
-                        temp_regs[candidate.a] = f"{temp_reg(candidate.b)}[{candidate.c + 1}]"
+                        temp_regs[candidate.a] = _index_expr(temp_reg(candidate.b), str(candidate.c + 1))
                     elif name in {"NAMECALL", "NAMECALLUDATA"} and candidate.aux is not None:
                         key_index = _aux_key_index(name, candidate.aux)
                         method = proto.constant_text(key_index) or f"K{key_index}"
@@ -3348,32 +3382,33 @@ def decompile_proto(
 
             repeat_exit_guard_index = None
             repeat_backedge_index = None
-            scan_index = index + 1
-            while scan_index < len(instructions):
-                candidate = instructions[scan_index]
-                if stop_pc is not None and candidate.pc >= stop_pc:
+            for candidate_index in targeting_jump_indices(
+                jumpbacks_by_target,
+                insn.pc,
+                index,
+                stop_pc,
+            ):
+                repeat_backedge_index = candidate_index
+                candidate = instructions[repeat_backedge_index]
+                guard_index = repeat_backedge_index - 1
+                guard = instructions[guard_index]
+                enclosed_by_forward_guard = any(
+                    prior.op.name in _CONDITIONAL_JUMP_OPS
+                    and prior.jump_target is not None
+                    and prior.next_pc <= candidate.pc < prior.jump_target
+                    and prior.jump_target > candidate.next_pc
+                    for prior in instructions[index:guard_index]
+                )
+                if (
+                    guard.op.name in _CONDITIONAL_JUMP_OPS
+                    and guard.next_pc == candidate.pc
+                    and guard.jump_target == candidate.next_pc
+                    and jump_taken_condition(guard) is not None
+                    and not enclosed_by_forward_guard
+                ):
+                    repeat_exit_guard_index = guard_index
                     break
-                if candidate.op.name == "JUMPBACK" and candidate.jump_target == insn.pc and scan_index > index:
-                    guard_index = scan_index - 1
-                    guard = instructions[guard_index]
-                    enclosed_by_forward_guard = any(
-                        prior.op.name in _CONDITIONAL_JUMP_OPS
-                        and prior.jump_target is not None
-                        and prior.next_pc <= candidate.pc < prior.jump_target
-                        and prior.jump_target > candidate.next_pc
-                        for prior in instructions[index:guard_index]
-                    )
-                    if (
-                        guard.op.name in _CONDITIONAL_JUMP_OPS
-                        and guard.next_pc == candidate.pc
-                        and guard.jump_target == candidate.next_pc
-                        and jump_taken_condition(guard) is not None
-                        and not enclosed_by_forward_guard
-                    ):
-                        repeat_exit_guard_index = guard_index
-                        repeat_backedge_index = scan_index
-                        break
-                scan_index += 1
+                repeat_backedge_index = None
 
             if repeat_exit_guard_index is not None and repeat_backedge_index is not None:
                 repeat_guard = instructions[repeat_exit_guard_index]
@@ -3388,20 +3423,10 @@ def decompile_proto(
                 index = pc_to_index.get(repeat_backedge.next_pc, repeat_backedge_index + 1)
                 continue
 
-            repeat_jump_index = None
-            scan_index = index + 1
-            while scan_index < len(instructions):
-                candidate = instructions[scan_index]
-                if stop_pc is not None and candidate.pc >= stop_pc:
-                    break
-                if (
-                    candidate.op.name in _CONDITIONAL_JUMP_OPS
-                    and candidate.jump_target == insn.pc
-                    and candidate.pc > insn.pc
-                ):
-                    repeat_jump_index = scan_index
-                    break
-                scan_index += 1
+            repeat_jump_index = next(
+                targeting_jump_indices(conditional_jumps_by_target, insn.pc, index, stop_pc),
+                None,
+            )
 
             if repeat_jump_index is not None:
                 repeat_jump = instructions[repeat_jump_index]
@@ -3992,7 +4017,7 @@ def decompile_proto(
                 set_reg_or_materialize_expression(
                     index,
                     insn.a,
-                    f"{reg(insn.b)}[{insn.c + 1}]",
+                    _index_expr(reg(insn.b), str(insn.c + 1)),
                     insn.next_pc,
                     indent,
                 )
@@ -4001,7 +4026,8 @@ def decompile_proto(
                 values = open_args(insn.b) if insn.c == 0 else [reg(insn.b + offset) for offset in range(max(insn.c - 1, 0))]
                 if table is not None and table.materialized:
                     for offset, value in enumerate(values):
-                        emit_line(indent, f"{reg(insn.a)}[{insn.aux + offset}] = {value}")
+                        target = _index_expr(reg(insn.a), str(insn.aux + offset))
+                        emit_line(indent, _assignment_source(target, value))
                 elif table is not None:
                     for offset, value in enumerate(values):
                         table.set_array(insn.aux + offset, value)
@@ -4051,12 +4077,12 @@ def decompile_proto(
                 value = reg(insn.a)
                 table_index = insn.c + 1
                 if table is not None and table.materialized:
-                    emit_line(indent, f"{reg(insn.b)}[{table_index}] = {value}")
+                    emit_line(indent, _assignment_source(_index_expr(reg(insn.b), str(table_index)), value))
                 elif table is not None:
                     table.set_array(table_index, value)
                     refresh_table_aliases(table)
                 else:
-                    emit_line(indent, f"{reg(insn.b)}[{table_index}] = {value}")
+                    emit_line(indent, _assignment_source(_index_expr(reg(insn.b), str(table_index)), value))
                 open_results = None
             elif name == "NEWCLASSMEMBER" and insn.aux is not None:
                 key = proto.constant_text(insn.aux) or f"K{insn.aux}"

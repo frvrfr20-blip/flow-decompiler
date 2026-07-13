@@ -2430,7 +2430,7 @@ def decompile_proto(
                     reads.update(range(insn.a + 1, insn.a + insn.b))
             elif name == "RETURN" and insn.b > 1:
                 reads.update(range(insn.a, insn.a + insn.b - 1))
-            elif name in {"GETTABLEKS", "GETUDATAKS", "NAMECALL", "NAMECALLUDATA"}:
+            elif name in {"GETTABLEKS", "GETUDATAKS", "GETTABLEN", "NAMECALL", "NAMECALLUDATA"}:
                 reads.add(insn.b)
             elif name == "GETTABLE":
                 reads.update({insn.b, insn.c})

@@ -9075,6 +9075,52 @@ def make_table_open_call_chunk():
     return bytes(out)
 
 
+def make_numeric_reads_of_open_call_table_chunk():
+    strings = ["provider", "print"]
+    words = [
+        encode_abc("NEWTABLE", 0, 1, 0),
+        1,
+        encode_abc("GETGLOBAL", 1, 0, 0),
+        0,
+        encode_abc("CALL", 1, 1, 0),
+        encode_abc("SETLIST", 0, 1, 0),
+        1,
+        encode_abc("GETTABLEN", 1, 0, 0),
+        encode_abc("GETTABLEN", 2, 0, 1),
+        encode_abc("GETTABLEN", 3, 0, 2),
+        encode_abc("GETGLOBAL", 4, 0, 0),
+        1,
+        encode_abc("MOVE", 5, 1, 0),
+        encode_abc("MOVE", 6, 2, 0),
+        encode_abc("MOVE", 7, 3, 0),
+        encode_abc("CALL", 4, 4, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([8, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    for string_id in range(1, 3):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 class ChunkTests(unittest.TestCase):
     def test_handcrafted_chunks_have_no_trailing_bytes(self):
         for name, value in sorted(globals().items()):
@@ -11159,6 +11205,15 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("print({provider()})", source)
         self.assertNotIn("print({})", source)
+
+    def test_decompile_numeric_table_reads_materialize_open_call_once(self):
+        chunk = parse_chunk(make_numeric_reads_of_open_call_table_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0 = {provider()}", source)
+        self.assertIn("print(r0[1], r0[2], r0[3])", source)
+        self.assertEqual(source.count("provider()"), 1)
 
     def test_large_table_literal_renders_multiline(self):
         table = TableLiteral()

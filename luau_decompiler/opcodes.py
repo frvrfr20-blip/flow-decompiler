@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 
 VERSION_MIN = 3
-VERSION_MAX = 11
+VERSION_MAX = 12
 VERSION_TARGET = 7
 TYPE_VERSION_MIN = 1
 TYPE_VERSION_MAX = 3

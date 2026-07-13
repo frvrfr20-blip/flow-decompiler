@@ -79,6 +79,7 @@ flow-decompiler live_samples\target.bytecode.b64 --disasm
 - Luau if-expressions, including simple `elseif` expression chains
 - readable Roblox idioms such as `game:GetService`, `WaitForChild`, `CharacterAdded:Wait`, `FireServer`, and `InvokeServer`
 - safe materialization of reused call results so side-effecting calls are not duplicated
+- register-aware local spilling and wide-result packing to stay below Luau's 200-local limit
 - readable function assignments, table methods, closure captures, and common module patterns
 
 Unsupported instructions are left as comments instead of being hidden.
@@ -106,11 +107,11 @@ flow-quality live_samples --compiler C:\path\to\luau-compile.exe --fail-on-synta
 
 The report separates parse failures, unknown instructions, evidence comments, unsupported output, and Luau syntax failures. Explicit `.txt` files remain accepted, while directory scans only include `.b64`, `.base64`, and `.luauc` files so generated reports are not mistaken for bytecode.
 
-The current regression corpus contains 65 valid live captures with 1,591 protos and 99,955 decoded instructions. Flow 0.2.1 produces syntax-valid Luau for all 65, with zero unknown opcodes and zero unsupported comments. Invalid or non-bytecode files are reported separately instead of being hidden.
+The current regression corpus contains 80 valid live captures with 4,416 protos and 539,890 decoded instructions. Flow 0.2.2 produces syntax-valid Luau for all 80, with zero unknown opcodes and zero unsupported comments. Invalid or non-bytecode files are reported separately instead of being hidden.
 
 ## Performance
 
-Flow caches repeated control-flow analysis and indexes jump targets once per prototype. On the development test machine, a 21,946-instruction capture dropped from 36.1 seconds to 1.8 seconds. A separate 181 KB capture with 254 prototypes and 16,581 instructions completes in about 3.2 seconds. Large UI results are inserted in chunks so the window remains responsive.
+Flow caches repeated control-flow analysis and indexes jump targets once per prototype. On the development test machine, a 136,822-instruction capture completes in about 2.4 seconds, and a 385-proto UI capture with 20,768 instructions completes in about 1.9 seconds. Large UI results are inserted in chunks so the window remains responsive.
 
 ## Notes
 

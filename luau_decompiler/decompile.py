@@ -163,7 +163,7 @@ def _is_if_expression(value: str) -> bool:
 
 
 def _field_expr(receiver: str, key: str) -> str:
-    receiver = _group_if_needed(receiver)
+    receiver = _receiver_expr(receiver)
     if _is_identifier(key):
         return f"{receiver}.{key}"
     return f"{receiver}[{_quote_string(key)}]"
@@ -173,7 +173,7 @@ def _index_expr(receiver: str, key_expr: str) -> str:
     key_text = _unquote_string_literal(key_expr)
     if key_text is not None and _is_identifier(key_text):
         return _field_expr(receiver, key_text)
-    return f"{_group_if_needed(receiver)}[{key_expr}]"
+    return f"{_receiver_expr(receiver)}[{key_expr}]"
 
 
 def _global_expr(key: str) -> str:
@@ -232,9 +232,7 @@ def _call_expr(function: str, args: list[str]) -> str:
 
 
 def _namecall_expr(receiver: str, method: str, args: list[str]) -> str:
-    receiver = _group_if_needed(receiver)
-    if _unquote_string_literal(receiver) is not None:
-        receiver = f"({receiver})"
+    receiver = _receiver_expr(receiver)
     if _is_identifier(method):
         return f"{receiver}:{method}{_call_args_source(args)}"
     all_args = [receiver, *args]
@@ -249,6 +247,19 @@ def _group_if_needed(value: str) -> str:
     if value.startswith(("not ", "-", "#")):
         return f"({value})"
     if any(token in value for token in _INFIX_TOKENS):
+        return f"({value})"
+    return value
+
+
+def _receiver_expr(value: str) -> str:
+    grouped = _group_if_needed(value)
+    if grouped != value:
+        return grouped
+    if value in {"nil", "true", "false"}:
+        return f"({value})"
+    if value.startswith("{") and value.endswith("}"):
+        return f"({value})"
+    if _unquote_string_literal(value) is not None:
         return f"({value})"
     return value
 

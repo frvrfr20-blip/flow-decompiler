@@ -3,7 +3,15 @@ import unittest
 import base64
 
 from luau_decompiler.chunk import parse_chunk
-from luau_decompiler.decompile import TableLiteral, _binary_expr, _call_expr, _namecall_expr, decompile_chunk
+from luau_decompiler.decompile import (
+    TableLiteral,
+    _binary_expr,
+    _call_expr,
+    _field_expr,
+    _index_expr,
+    _namecall_expr,
+    decompile_chunk,
+)
 from luau_decompiler.disasm import encode_abc, encode_ad, encode_e
 
 
@@ -10044,6 +10052,20 @@ class ChunkTests(unittest.TestCase):
             "    1, 2, 3, 4, 5, 6, 7,\n"
             "}",
         )
+
+    def test_table_literal_receiver_is_grouped_for_index(self):
+        self.assertEqual(_index_expr("{value = 1}", "key"), "({value = 1})[key]")
+
+    def test_multiline_table_literal_receiver_is_grouped_for_index(self):
+        table = "{\n    value = 1,\n}"
+
+        self.assertEqual(_index_expr(table, "key"), f"({table})[key]")
+
+    def test_nil_receiver_is_grouped_for_namecall(self):
+        self.assertEqual(_namecall_expr("nil", "GetFullName", []), "(nil):GetFullName()")
+
+    def test_boolean_receiver_is_grouped_for_field(self):
+        self.assertEqual(_field_expr("true", "value"), "(true).value")
 
     def test_live_roblox_encoded_opcode_chunk_is_preserved(self):
         raw = base64.b64decode("CQMAAAEAAAABAgACowAAAIIAAQAAAAEAARgAAAEAAAAAAA==")

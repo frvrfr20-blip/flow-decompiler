@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from luau_decompiler.ui import _active_source, _apply_startup_state, _build_parser
+from luau_decompiler.ui import (
+    OUTPUT_INSERT_CHUNK_SIZE,
+    FlowDecompilerApp,
+    _active_source,
+    _apply_startup_state,
+    _build_parser,
+)
 
 
 class UiInputStateTests(unittest.TestCase):
@@ -52,6 +58,48 @@ class UiInputStateTests(unittest.TestCase):
         self.assertEqual(state.source, selected)
         self.assertEqual(state.path, selected)
         self.assertEqual(state.label, "sample.b64")
+
+    def test_large_output_is_inserted_in_idle_chunks(self):
+        class Root:
+            def __init__(self):
+                self.callbacks = []
+
+            def after_idle(self, callback):
+                self.callbacks.append(callback)
+
+        class Output:
+            def __init__(self):
+                self.parts = []
+                self.modified = None
+
+            def insert(self, index, value):
+                self.assert_index = index
+                self.parts.append(value)
+
+            def edit_modified(self, value):
+                self.modified = value
+
+        app = FlowDecompilerApp.__new__(FlowDecompilerApp)
+        app.root = Root()
+        app.output = Output()
+        app.render_token = 7
+        app.updating_output = True
+        app.output_is_result = False
+        busy_states = []
+        app._set_busy = lambda busy, status: busy_states.append((busy, status))
+        text = "x" * (OUTPUT_INSERT_CHUNK_SIZE * 2 + 17)
+
+        app._insert_output_chunk(7, text, 0, "large.b64", "decompile")
+        while app.root.callbacks:
+            app.root.callbacks.pop(0)()
+
+        self.assertEqual("".join(app.output.parts), text)
+        self.assertTrue(all(len(part) <= OUTPUT_INSERT_CHUNK_SIZE for part in app.output.parts))
+        self.assertGreater(len(app.output.parts), 1)
+        self.assertEqual(app.output.assert_index, "end-1c")
+        self.assertFalse(app.updating_output)
+        self.assertTrue(app.output_is_result)
+        self.assertEqual(busy_states, [(False, "large.b64 -> decompile")])
 
 
 if __name__ == "__main__":

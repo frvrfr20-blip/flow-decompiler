@@ -19,6 +19,7 @@ from .settings import FlowSettings, load_settings, set_launch_at_sign_in
 
 
 MODES = ("decompile", "disasm", "summary")
+OUTPUT_INSERT_CHUNK_SIZE = 32 * 1024
 
 UI_COLORS = {
     "bg": "#111214",
@@ -678,17 +679,41 @@ class FlowDecompilerApp:
             self.root.after(1, self._poll_render)
             return
 
-        self._set_busy(False, f"{filename} -> {mode}")
         if error:
+            self._set_busy(False, f"{filename} -> {mode}")
             self.status.set("Error")
             messagebox.showerror("Flow Decompiler", error)
             return
         self.updating_output = True
+        self.output_is_result = True
         self.output.delete("1.0", "end")
-        self.output.insert("1.0", output)
+        self._insert_output_chunk(token, output, 0, filename, mode)
+
+    def _insert_output_chunk(
+        self,
+        token: int,
+        output: str,
+        offset: int,
+        filename: str,
+        mode: str,
+    ) -> None:
+        if token != self.render_token:
+            self.updating_output = False
+            return
+
+        end = min(offset + OUTPUT_INSERT_CHUNK_SIZE, len(output))
+        if end > offset:
+            self.output.insert("end-1c", output[offset:end])
+        if end < len(output):
+            self.root.after_idle(
+                lambda: self._insert_output_chunk(token, output, end, filename, mode)
+            )
+            return
+
         self.output.edit_modified(False)
         self.updating_output = False
         self.output_is_result = True
+        self._set_busy(False, f"{filename} -> {mode}")
 
     def _save(self) -> None:
         text = self.output.get("1.0", "end-1c")

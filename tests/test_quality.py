@@ -74,6 +74,17 @@ class CompilerQualityTests(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(run.call_args.args[0][1], "--null")
 
+    def test_check_luau_syntax_redacts_temp_path_with_forward_slashes(self):
+        def completed(args, **_kwargs):
+            source_path = Path(args[2]).as_posix()
+            return Mock(returncode=1, stdout="", stderr=f"{source_path}(1,1): bad syntax")
+
+        with patch("luau_decompiler.quality.subprocess.run", side_effect=completed):
+            result = check_luau_syntax("not valid\n", Path("luau-compile"))
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.error, "<output>(1,1): bad syntax")
+
     def test_quality_cli_emits_json_and_fails_on_syntax_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "namecall.luauc"

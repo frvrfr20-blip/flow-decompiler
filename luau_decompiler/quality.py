@@ -87,7 +87,8 @@ def check_luau_syntax(source: str, compiler: Path) -> SyntaxResult:
     if completed.returncode == 0:
         return SyntaxResult(True)
     error = (completed.stderr or completed.stdout).strip()
-    return SyntaxResult(False, error.replace(str(source_path), "<output>") or "Luau syntax check failed")
+    error = error.replace(str(source_path), "<output>").replace(source_path.as_posix(), "<output>")
+    return SyntaxResult(False, error or "Luau syntax check failed")
 
 
 def analyze_sample(path: Path, syntax_checker: SyntaxChecker | None = None) -> SampleQuality:

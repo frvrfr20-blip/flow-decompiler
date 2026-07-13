@@ -10102,6 +10102,9 @@ class ChunkTests(unittest.TestCase):
     def test_boolean_receiver_is_grouped_for_field(self):
         self.assertEqual(_field_expr("true", "value"), "(true).value")
 
+    def test_vararg_call_target_is_grouped(self):
+        self.assertEqual(_call_expr("...", []), "(...)()")
+
     def test_parenthesized_assignment_after_call_needs_separator(self):
         self.assertTrue(_needs_statement_separator("    r9:Add()", "    ", "(state or fallback).active = true"))
 

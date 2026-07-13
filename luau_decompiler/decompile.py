@@ -202,6 +202,8 @@ def _is_dotted_identifier_path(value: str) -> bool:
 def _call_target_expr(function: str) -> str:
     if function.startswith("(") and function.endswith(")"):
         return function
+    if function == "...":
+        return "(...)"
     if _is_if_expression(function):
         return f"({function})"
     if function.startswith("function("):

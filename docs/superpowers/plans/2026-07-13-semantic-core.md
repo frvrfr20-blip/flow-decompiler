@@ -252,7 +252,7 @@ Route call/table/index reuse decisions through `requires_materialization(value, 
 
 - [ ] **Step 5: Add behavior regressions**
 
-Add failing-then-passing tests for duplicated calls, indexed reads, table aliases, reused binary values, moved multi-results, and open calls. Assert single evaluation and syntax-valid source shape.
+Add failing-then-passing tests for duplicated calls, indexed reads, table aliases, reused binary values, moved multi-results, open calls, and recursive captured closures. Assert single evaluation, stable object/closure identity, and syntax-valid source shape. The official `closures_tables.luau` differential fixture must become equivalent in this task; `captures.luau` must also become equivalent when its remaining mismatch is closure identity. Keep loop-carried register and branch-region repairs in Tasks 5 and 6 instead of adding opcode-specific workarounds here.
 
 - [ ] **Step 6: Verify and commit**
 

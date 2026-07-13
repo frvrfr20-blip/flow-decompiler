@@ -17,6 +17,9 @@ class _MutationAwareList(list[_Item]):
         super().__init__(values)
         self._changed = changed
 
+    def _is_owned_by(self, changed: Callable[[], None]) -> bool:
+        return self._changed == changed
+
     def _did_change(self) -> None:
         self._changed()
 
@@ -94,7 +97,9 @@ class BasicBlock:
             name == "instructions"
             and "_observers" in self.__dict__
         ):
-            if previous is not value or not isinstance(value, _MutationAwareList):
+            if not isinstance(value, _MutationAwareList) or not value._is_owned_by(
+                self._instructions_changed
+            ):
                 value = _MutationAwareList(
                     cast(Iterable[Instruction], value),
                     self._instructions_changed,
@@ -167,7 +172,9 @@ class ControlFlowGraph:
     def __setattr__(self, name: str, value: object) -> None:
         previous = getattr(self, name, None)
         if name == "blocks" and "_blocks_by_start_pc" in self.__dict__:
-            if previous is not value or not isinstance(value, _MutationAwareList):
+            if not isinstance(value, _MutationAwareList) or not value._is_owned_by(
+                self._blocks_changed
+            ):
                 value = _MutationAwareList(
                     cast(Iterable[BasicBlock], value),
                     self._blocks_changed,

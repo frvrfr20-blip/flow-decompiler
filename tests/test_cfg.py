@@ -224,6 +224,82 @@ class CfgTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             graph.block_at(0)
 
+    def test_cfg_constructed_from_another_graphs_blocks_owns_its_callback(self):
+        instruction = decode_words([encode_abc("RETURN", 0, 1, 0)])[0]
+        block = BasicBlock(0, 0, [instruction], [])
+        first = ControlFlowGraph([block])
+        second = ControlFlowGraph(first.blocks)
+
+        self.assertIsNot(first.blocks, second.blocks)
+        self.assertEqual(len(block._observers), 2)
+
+        block.start_pc = 7
+
+        self.assertTrue(first._indexes_dirty)
+        self.assertTrue(second._indexes_dirty)
+        self.assertIs(first.block_at(7), block)
+        self.assertIs(second.block_at(7), block)
+
+        block.instructions.clear()
+
+        self.assertTrue(first._indexes_dirty)
+        self.assertTrue(second._indexes_dirty)
+        first._refresh_indexes()
+        second._refresh_indexes()
+        self.assertEqual(first._blocks_by_instruction_pc, {})
+        self.assertEqual(second._blocks_by_instruction_pc, {})
+
+    def test_block_constructed_from_another_blocks_instructions_owns_its_callback(self):
+        instruction = decode_words([encode_abc("RETURN", 0, 1, 0)])[0]
+        source = BasicBlock(0, 0, [instruction], [])
+        copied = BasicBlock(1, 1, source.instructions, [])
+        source_graph = ControlFlowGraph([source])
+        copied_graph = ControlFlowGraph([copied])
+
+        self.assertIsNot(source.instructions, copied.instructions)
+
+        copied.instructions.clear()
+
+        self.assertFalse(source_graph._indexes_dirty)
+        self.assertTrue(copied_graph._indexes_dirty)
+        source_graph._refresh_indexes()
+        copied_graph._refresh_indexes()
+        self.assertIn(instruction.pc, source_graph._blocks_by_instruction_pc)
+        self.assertEqual(copied_graph._blocks_by_instruction_pc, {})
+
+    def test_cfg_and_block_keep_owned_list_identity_for_in_place_mutations(self):
+        instruction = decode_words([encode_abc("RETURN", 0, 1, 0)])[0]
+        block = BasicBlock(0, 0, [instruction], [])
+        graph = ControlFlowGraph([block])
+        blocks = graph.blocks
+        instructions = block.instructions
+
+        graph.blocks = blocks
+        block.instructions = instructions
+        self.assertIs(graph.blocks, blocks)
+        self.assertIs(block.instructions, instructions)
+        self.assertFalse(graph._indexes_dirty)
+
+        graph.blocks = [BasicBlock(1, 1, [], [])]
+        block.instructions = []
+        graph.blocks = blocks
+        block.instructions = instructions
+        self.assertIs(graph.blocks, blocks)
+        self.assertIs(block.instructions, instructions)
+
+        graph.blocks += []
+        block.instructions += []
+        self.assertIs(graph.blocks, blocks)
+        self.assertIs(block.instructions, instructions)
+        self.assertTrue(graph._indexes_dirty)
+
+        graph._refresh_indexes()
+        graph.blocks *= 1
+        block.instructions *= 1
+        self.assertIs(graph.blocks, blocks)
+        self.assertIs(block.instructions, instructions)
+        self.assertTrue(graph._indexes_dirty)
+
     def test_cfg_instruction_pc_index_maps_decoded_words_and_excludes_aux_words(self):
         cfg = build_cfg(
             decode_words(

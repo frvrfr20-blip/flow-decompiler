@@ -3,6 +3,7 @@ import sys
 import unittest
 import base64
 import re
+from unittest.mock import patch
 
 from luau_decompiler.chunk import parse_chunk
 from luau_decompiler.decompile import (
@@ -18,6 +19,7 @@ from luau_decompiler.decompile import (
     decompile_chunk,
 )
 from luau_decompiler.disasm import encode_abc, encode_ad, encode_e
+from luau_decompiler.value_ir import Effect, requires_materialization as value_requires_materialization
 
 
 def varint(value):
@@ -10625,6 +10627,18 @@ class ChunkTests(unittest.TestCase):
             source,
         )
         self.assertEqual(source.count("compute()"), 1)
+
+    def test_decompile_routes_reused_call_materialization_through_value_ir(self):
+        chunk = parse_chunk(make_reused_call_result_chunk())
+
+        with patch(
+            "luau_decompiler.decompile.requires_materialization",
+            wraps=value_requires_materialization,
+        ) as materialize:
+            source = decompile_chunk(chunk)
+
+        self.assertIn("local r0 = compute()\nprint(r0)\nreturn r0", source)
+        self.assertTrue(any(call.args[0].effect is Effect.CALL for call in materialize.call_args_list))
 
     def test_decompile_spills_excess_materialized_locals(self):
         chunk = parse_chunk(make_many_materialized_call_results_chunk())

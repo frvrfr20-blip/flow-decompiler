@@ -847,6 +847,36 @@ def make_return_then_dead_global_chunk():
     return bytes(out)
 
 
+def make_nil_receiver_table_write_chunk():
+    words = [
+        encode_abc("LOADNIL", 0, 0, 0),
+        encode_abc("LOADNIL", 1, 0, 0),
+        encode_abc("LOADNIL", 2, 0, 0),
+        encode_abc("SETTABLE", 0, 1, 2),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table([])
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_udata_field_call_chunk():
     strings = ["print", "obj", "Name"]
     words = [
@@ -10130,6 +10160,14 @@ class ChunkTests(unittest.TestCase):
 
     def test_loop_range_stop_can_be_continue_with_loop_context(self):
         self.assertTrue(_is_loop_continue_target(20, 20, 10))
+
+    def test_settable_groups_literal_receiver(self):
+        source = decompile_chunk(parse_chunk(make_nil_receiver_table_write_chunk()))
+
+        self.assertIn("(nil)[nil] = nil", source)
+
+    def test_vararg_receiver_is_grouped_for_index(self):
+        self.assertEqual(_index_expr("...", "..."), "(...)[...]")
 
     def test_live_roblox_encoded_opcode_chunk_is_preserved(self):
         raw = base64.b64decode("CQMAAAEAAAABAgACowAAAIIAAQAAAAEAARgAAAEAAAAAAA==")

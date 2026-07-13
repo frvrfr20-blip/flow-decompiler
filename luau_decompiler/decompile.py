@@ -257,7 +257,7 @@ def _receiver_expr(value: str) -> str:
     grouped = _group_if_needed(value)
     if grouped != value:
         return grouped
-    if value in {"nil", "true", "false"}:
+    if value in {"nil", "true", "false", "..."}:
         return f"({value})"
     if value.startswith("{") and value.endswith("}"):
         return f"({value})"
@@ -2097,7 +2097,7 @@ def decompile_proto(
                     receiver = span_regs.get(candidate.b, reg(candidate.b))
                     key = span_regs.get(candidate.c, reg(candidate.c))
                     key_text = _unquote_string_literal(key)
-                    target = _field_expr(receiver, key_text) if key_text is not None else f"{receiver}[{key}]"
+                    target = _field_expr(receiver, key_text) if key_text is not None else _index_expr(receiver, key)
                     value = span_regs.get(candidate.a, reg(candidate.a))
                     return candidate.b, target, value
 
@@ -4030,7 +4030,7 @@ def decompile_proto(
                 target = (
                     _field_expr(reg(insn.b), key_text)
                     if key_text is not None
-                    else f"{reg(insn.b)}[{key}]"
+                    else _index_expr(reg(insn.b), key)
                 )
                 if table is not None and insn.b in pending_table_locals and value.startswith("function("):
                     emit_pending_table_local(insn.b, indent)

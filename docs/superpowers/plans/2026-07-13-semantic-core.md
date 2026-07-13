@@ -153,7 +153,7 @@ Use iterative set intersection for dominators/post-dominators and Tarjan's algor
 
 - [ ] **Step 4: Write failing natural-loop and irreducible-SCC tests**
 
-Cover a single natural loop, nested loop, two-entry SCC, terminal-only graph, empty graph, and AUX words that must never become block leaders.
+Cover a single natural loop, nested loop, two-entry SCC, terminal-only graph, empty graph, and AUX words that must never become block leaders. Add dead-code regressions after unconditional jumps and returns: the next real instruction must start an unreachable block so a buried instruction can never replace the true terminator or erase its edge.
 
 - [ ] **Step 5: Implement back edges, natural loops, SCC entries, and O(1) lookup**
 

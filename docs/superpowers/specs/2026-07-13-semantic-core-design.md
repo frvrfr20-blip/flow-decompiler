@@ -155,6 +155,8 @@ The parser will add configurable internal limits for:
 
 Errors include section, byte offset, proto ID when known, observed value, and allowed limit. Defaults must comfortably exceed the largest valid live sample.
 
+Compatibility includes official Luau 0.729 bytecode version 12. Flow will honor each proto's declared serialized-size boundary, preserve optional inlining-cost metadata, reject framing overruns contextually, and skip only explicitly declared trailing proto bytes for forward compatibility.
+
 ## Diagnostics And Performance
 
 Each decompilation will collect optional stage diagnostics:

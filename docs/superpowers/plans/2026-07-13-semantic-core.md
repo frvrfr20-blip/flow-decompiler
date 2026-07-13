@@ -71,7 +71,7 @@ Create immutable `ProcessResult(returncode, stdout, stderr, timed_out=False)` an
 
 - [ ] **Step 4: Add failing toolchain command and timeout tests**
 
-Patch `subprocess.run` only at the external process boundary. Verify compiler arguments are `[compiler, "binary", source_path]`, runtime arguments are `[runtime, source_path]`, UTF-8 is used, and `TimeoutExpired` becomes a timed-out `ProcessResult`.
+Patch `subprocess.run` only at the external process boundary. Verify compiler arguments are `[compiler, "--binary", source_path]`, runtime arguments are `[runtime, source_path]`, UTF-8 is used, and `TimeoutExpired` becomes a timed-out `ProcessResult`.
 
 - [ ] **Step 5: Implement compilation, execution, and roundtrip checking**
 
@@ -170,15 +170,16 @@ Run focused CFG/control-flow tests and the full suite; expect PASS. Commit `luau
 **Files:**
 - Modify: `luau_decompiler/binary.py`
 - Modify: `luau_decompiler/chunk.py`
+- Modify: `luau_decompiler/opcodes.py`
 - Create: `tests/test_parser_limits.py`
 
 **Interfaces:**
 - Produces: `ParseLimits`, `ChunkDecodeError`, and `parse_chunk(data, limits=None)`.
 - Preserves: default successful parsing for all existing chunks.
 
-- [ ] **Step 1: Write failing oversized-count and contextual-EOF tests**
+- [ ] **Step 1: Write failing oversized-count, contextual-EOF, and Luau v12 tests**
 
-Assert declared string/instruction counts over tiny configured limits fail before allocation, and truncated data reports section plus byte offset.
+Assert declared string/instruction counts over tiny configured limits fail before allocation, and truncated data reports section plus byte offset. Compile an official Luau 0.729 fixture with `--fflags=LuauBytecodeCostModel=true`; verify Flow initially rejects version 12, then preserve the fixture as the authoritative framing/cost regression.
 
 - [ ] **Step 2: Verify RED**
 
@@ -209,13 +210,15 @@ class ParseLimits:
 
 Implement `_read_count(reader, section, limit, proto_id=None)` and wrap low-level EOF/index/tag failures with preserved exception chaining.
 
-- [ ] **Step 4: Add total, constant, child, string-byte, and index validation tests**
+Raise `VERSION_MAX` to 12 and implement Luau's exact v12 proto layout from the tagged 0.729 source: read a varint serialized-size prefix before each proto, treat that size as a hard proto boundary, parse the existing body, read a varint64 cost after feedback when `LPF_INLINABLE` (`1 << 3`) is set, and advance to the declared proto end so future trailing fields remain forward-compatible. Store optional `serialized_size` and `cost` metadata on the parsed proto. Reject undersized, overrun, truncated, and out-of-chunk boundaries contextually; do not guess or scan for the next proto.
 
-Use deliberately tiny limits with existing valid fixture builders. Verify one-at-limit passes, every declared limit has one focused failure, and out-of-range `main_proto`/child references fail contextually.
+- [ ] **Step 4: Add total, constant, child, string-byte, index, and v12-boundary validation tests**
+
+Use deliberately tiny limits with existing valid fixture builders. Verify one-at-limit passes, every declared limit has one focused failure, and out-of-range `main_proto`/child references fail contextually. Cover v12 proto sizes at exact boundary, too small, too large, truncated, unknown trailing bytes, inlinable cost present, and non-inlinable cost absent.
 
 - [ ] **Step 5: Integrate all variable-size loops, verify, and commit**
 
-Check counts before allocation/reads, track total instructions incrementally, run parser/chunk/CLI tests, full tests, and the external corpus. Commit as `Harden chunk parsing with bounded diagnostics`.
+Check counts before allocation/reads, track total instructions incrementally, run parser/chunk/CLI tests, full tests, the official v12 fixture, and the external corpus. Commit as `Harden chunk parsing with bounded diagnostics`.
 
 ---
 
@@ -397,6 +400,8 @@ Use `time.perf_counter()` around decode, CFG, region, reconstruction, and print 
 - [ ] **Step 4: Add CLI tests and `--diagnostics`**
 
 `flow-decompiler input --diagnostics` prints JSON instead of source. It is mutually exclusive with `--disasm` and `--summary`; invalid combinations return argparse code 2.
+
+Add a Windows-console regression using a text stream configured as CP1252 and reconstructed source containing `U+2605 BLACK STAR`. Route CLI writes through a UTF-8-safe helper that uses the stream's binary buffer when the active text encoding cannot represent the output; preserve ordinary redirected text streams and do not replace characters.
 
 - [ ] **Step 5: Add UI tests and Diagnostics mode**
 

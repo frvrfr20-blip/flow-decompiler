@@ -1525,6 +1525,46 @@ def make_branch_mutated_table_config_chunk():
     return bytes(out)
 
 
+def make_branch_mutated_table_alias_chunk():
+    strings = ["x"]
+    words = [
+        encode_abc("NEWTABLE", 1, 0, 0),
+        0,
+        encode_abc("MOVE", 2, 1, 0),
+        encode_ad("JUMPIFNOT", 0, 4),
+        encode_ad("LOADN", 3, 1),
+        encode_abc("SETTABLEKS", 3, 1, 0),
+        0,
+        encode_ad("JUMP", 0, 3),
+        encode_ad("LOADN", 3, 2),
+        encode_abc("SETTABLEKS", 3, 2, 0),
+        0,
+        encode_abc("RETURN", 1, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([4, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_loop_mutated_table_dynamic_key_chunk():
     strings = ["items", "Name", "out", "_", "child"]
     words = [
@@ -6540,6 +6580,68 @@ def make_mutual_forward_recursive_closures_chunk():
     return bytes(out)
 
 
+def make_self_recursive_closure_name_collision_chunk(use_dupclosure=False):
+    strings = ["helper"]
+    closure_opcode = "DUPCLOSURE" if use_dupclosure else "NEWCLOSURE"
+    main_words = [
+        encode_ad(closure_opcode, 1, 0),
+        encode_abc("CAPTURE", 1, 1, 0),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+    child_words = [
+        encode_abc("GETUPVAL", 0, 0, 0),
+        encode_abc("CALL", 0, 1, 2),
+        encode_abc("RETURN", 0, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(2)
+
+    out += bytes([2, 1, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(main_words))
+    for word in main_words:
+        out += struct.pack("<I", word)
+    if use_dupclosure:
+        out += varint(1)
+        out.append(6)
+        out += varint(1)
+        out += varint(0)
+    else:
+        out += varint(0)
+        out += varint(1)
+        out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(1)
+    out += varint(1)
+    out += varint(1)
+    out += varint(0)
+    out += varint(len(main_words))
+    out.append(0)
+    out += varint(0)
+
+    out += bytes([1, 0, 1, 0, 0])
+    out += varint(0)
+    out += varint(len(child_words))
+    for word in child_words:
+        out += struct.pack("<I", word)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out += varint(1)
+    out.append(0)
+    out.append(0)
+
+    out += varint(0)
+    return bytes(out)
+
+
 def make_dupclosure_captured_expression_chunk():
     strings = ["script", "Parent"]
     main_words = [
@@ -7687,6 +7789,81 @@ def make_reused_call_result_through_move_chunk():
     return bytes(out)
 
 
+def make_moved_open_call_results_chunk():
+    strings = ["provider", "print"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("CALL", 0, 1, 0),
+        encode_abc("MOVE", 2, 1, 0),
+        encode_ad("GETIMPORT", 3, 2),
+        import_id(1),
+        encode_abc("MOVE", 4, 0, 0),
+        encode_abc("MOVE", 5, 2, 0),
+        encode_abc("CALL", 3, 3, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(3)
+    out.append(3)
+    out += varint(1)
+    out.append(3)
+    out += varint(2)
+    out.append(4)
+    out += struct.pack("<I", import_id(1))
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_moved_open_call_fixed_return_chunk(result_index=0):
+    strings = ["provider"]
+    words = [
+        encode_abc("GETGLOBAL", 0, 0, 0),
+        0,
+        encode_abc("CALL", 0, 1, 0),
+        encode_abc("MOVE", 2, result_index, 0),
+        encode_abc("RETURN", 2, 2, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([3, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 def make_delayed_single_call_result_chunk():
     strings = ["clock", "wait"]
     words = [
@@ -7731,6 +7908,41 @@ def make_reused_binary_result_chunk():
     strings = ["print"]
     words = [
         encode_abc("SUB", 2, 0, 1),
+        encode_abc("GETGLOBAL", 3, 0, 0),
+        0,
+        encode_abc("MOVE", 4, 2, 0),
+        encode_abc("MOVE", 5, 2, 0),
+        encode_abc("CALL", 3, 3, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([6, 2, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(1)
+    out.append(3)
+    out += varint(1)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
+def make_reused_indexed_read_chunk():
+    strings = ["print"]
+    words = [
+        encode_abc("GETTABLE", 2, 0, 1),
         encode_abc("GETGLOBAL", 3, 0, 0),
         0,
         encode_abc("MOVE", 4, 2, 0),
@@ -8863,6 +9075,52 @@ def make_table_open_call_chunk():
     return bytes(out)
 
 
+def make_numeric_reads_of_open_call_table_chunk():
+    strings = ["provider", "print"]
+    words = [
+        encode_abc("NEWTABLE", 0, 1, 0),
+        1,
+        encode_abc("GETGLOBAL", 1, 0, 0),
+        0,
+        encode_abc("CALL", 1, 1, 0),
+        encode_abc("SETLIST", 0, 1, 0),
+        1,
+        encode_abc("GETTABLEN", 1, 0, 0),
+        encode_abc("GETTABLEN", 2, 0, 1),
+        encode_abc("GETTABLEN", 3, 0, 2),
+        encode_abc("GETGLOBAL", 4, 0, 0),
+        1,
+        encode_abc("MOVE", 5, 1, 0),
+        encode_abc("MOVE", 6, 2, 0),
+        encode_abc("MOVE", 7, 3, 0),
+        encode_abc("CALL", 4, 4, 1),
+        encode_abc("RETURN", 0, 1, 0),
+    ]
+
+    out = bytearray()
+    out.append(4)
+    out.append(3)
+    out += string_table(strings)
+    out.append(0)
+    out += varint(1)
+    out += bytes([8, 0, 0, 0, 0])
+    out += varint(0)
+    out += varint(len(words))
+    for word in words:
+        out += struct.pack("<I", word)
+    out += varint(2)
+    for string_id in range(1, 3):
+        out.append(3)
+        out += varint(string_id)
+    out += varint(0)
+    out += varint(0)
+    out += varint(0)
+    out.append(0)
+    out.append(0)
+    out += varint(0)
+    return bytes(out)
+
+
 class ChunkTests(unittest.TestCase):
     def test_handcrafted_chunks_have_no_trailing_bytes(self):
         for name, value in sorted(globals().items()):
@@ -9206,6 +9464,19 @@ class ChunkTests(unittest.TestCase):
         )
         self.assertNotIn("if flag then\n", source)
         self.assertNotIn('return {retry = 2}', source)
+
+    def test_decompile_branch_table_alias_keeps_one_allocation_identity(self):
+        chunk = parse_chunk(make_branch_mutated_table_alias_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertEqual(source.count("= {}"), 1)
+        self.assertIn("local r1 = {}", source)
+        self.assertIn("    r1.x = 1", source)
+        self.assertIn("    r1.x = 2", source)
+        self.assertIn("return r1", source)
+        self.assertNotIn("local r2 = {}", source)
+        self.assertNotIn("return {}", source)
 
     def test_decompile_loop_mutated_table_materializes_before_loop(self):
         chunk = parse_chunk(make_loop_mutated_table_dynamic_key_chunk())
@@ -10373,6 +10644,21 @@ class ChunkTests(unittest.TestCase):
         self.assertNotIn("upvalue", source)
         self.assertNotIn("CAPTURE", source)
 
+    def test_decompile_self_recursive_closure_does_not_shadow_live_parameter(self):
+        for use_dupclosure in (False, True):
+            with self.subTest(use_dupclosure=use_dupclosure):
+                chunk = parse_chunk(
+                    make_self_recursive_closure_name_collision_chunk(use_dupclosure)
+                )
+
+                source = decompile_chunk(chunk)
+
+                self.assertIn("local helper_2 = nil", source)
+                self.assertIn("helper_2 = function()", source)
+                self.assertIn("return helper_2()", source)
+                self.assertTrue(source.rstrip().endswith("return helper"))
+                self.assertNotIn("local helper = nil", source)
+
     def test_decompile_dupclosure_hoists_captured_expression(self):
         chunk = parse_chunk(make_dupclosure_captured_expression_chunk())
 
@@ -10649,6 +10935,33 @@ class ChunkTests(unittest.TestCase):
         self.assertIn("local r1 = compute()\nprint(r1, r1)", source)
         self.assertEqual(source.count("compute()"), 1)
 
+    def test_decompile_moved_open_call_results_share_one_group(self):
+        chunk = parse_chunk(make_moved_open_call_results_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0, r1 = provider()\nprint(r0, r1)", source)
+        self.assertEqual(source.count("provider()"), 1)
+        self.assertNotIn("r2", source)
+
+    def test_decompile_moved_nonbase_open_result_materializes_group_once(self):
+        chunk = parse_chunk(make_moved_open_call_fixed_return_chunk(1))
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0, r1 = provider()\nreturn r1", source)
+        self.assertEqual(source.count("provider()"), 1)
+        self.assertNotIn("return r2", source)
+
+    def test_decompile_moved_base_open_result_keeps_fixed_return_arity(self):
+        chunk = parse_chunk(make_moved_open_call_fixed_return_chunk(0))
+
+        source = decompile_chunk(chunk)
+
+        self.assertRegex(source, r"local r0(?:, r1)? = provider\(\)\nreturn r0")
+        self.assertEqual(source.count("provider()"), 1)
+        self.assertNotIn("return provider()", source)
+
     def test_decompile_delayed_single_call_result_preserves_snapshot(self):
         chunk = parse_chunk(make_delayed_single_call_result_chunk())
 
@@ -10664,6 +10977,14 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("local r2 = p0 - p1\nprint(r2, r2)", source)
         self.assertEqual(source.count("p0 - p1"), 1)
+
+    def test_decompile_reused_indexed_read_materializes_once(self):
+        chunk = parse_chunk(make_reused_indexed_read_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r2 = p0[p1]\nprint(r2, r2)", source)
+        self.assertEqual(source.count("p0[p1]"), 1)
 
     def test_decompile_property_read_before_loop_preserves_snapshot(self):
         chunk = parse_chunk(make_loop_property_snapshot_chunk())
@@ -10884,6 +11205,15 @@ class ChunkTests(unittest.TestCase):
 
         self.assertIn("print({provider()})", source)
         self.assertNotIn("print({})", source)
+
+    def test_decompile_numeric_table_reads_materialize_open_call_once(self):
+        chunk = parse_chunk(make_numeric_reads_of_open_call_table_chunk())
+
+        source = decompile_chunk(chunk)
+
+        self.assertIn("local r0 = {provider()}", source)
+        self.assertIn("print(r0[1], r0[2], r0[3])", source)
+        self.assertEqual(source.count("provider()"), 1)
 
     def test_large_table_literal_renders_multiline(self):
         table = TableLiteral()

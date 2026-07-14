@@ -109,6 +109,17 @@ The report separates parse failures, unknown instructions, evidence comments, un
 
 The current regression corpus contains 80 valid live captures with 4,416 protos and 539,890 decoded instructions. Flow 0.2.2 produces syntax-valid Luau for all 80, with zero unknown opcodes and zero unsupported comments. Invalid or non-bytecode files are reported separately instead of being hidden.
 
+## Differential Checks
+
+Compare deterministic Luau source fixtures with their Flow reconstructions using official Luau tools:
+
+```powershell
+flow-differential tests\fixtures\differential --compiler C:\path\to\luau-compile.exe --runtime C:\path\to\luau.exe
+flow-differential tests\fixtures\differential --compiler C:\path\to\luau-compile.exe --runtime C:\path\to\luau.exe --json
+```
+
+Each fixture is compiled to bytecode with the official `luau-compile --binary` mode, reconstructed by Flow, and executed separately. The command compares timeout status, return code, stdout, and stderr exactly, and exits nonzero for a mismatch, timeout, or unavailable tool.
+
 ## Performance
 
 Flow caches repeated control-flow analysis and indexes jump targets once per prototype. On the development test machine, a 136,822-instruction capture completes in about 2.4 seconds, and a 385-proto UI capture with 20,768 instructions completes in about 1.9 seconds. Large UI results are inserted in chunks so the window remains responsive.

@@ -1,7 +1,9 @@
 import unittest
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
+from unittest.mock import patch
 
+import luau_decompiler.regions as regions_module
 from luau_decompiler.cfg import analyze_cfg, build_cfg
 from luau_decompiler.disasm import decode_words, encode_abc, encode_ad
 from luau_decompiler.regions import EdgeRole, LoopKind, recover_regions
@@ -151,6 +153,26 @@ def conditional_diamond(opcode, *, aux=None):
         encode_abc("NOP", 0, 0, 0),
         encode_abc("RETURN", 0, 1, 0),
     ]
+
+
+def loop_with_interior_diamonds(count):
+    words = [encode_ad("JUMPIFNOT", 0, count * 4 + 1)]
+    for _ in range(count):
+        words.extend(
+            (
+                encode_ad("JUMPIF", 0, 2),
+                encode_abc("NOP", 0, 0, 0),
+                encode_ad("JUMP", 0, 1),
+                encode_abc("NOP", 0, 0, 0),
+            )
+        )
+    words.extend(
+        (
+            encode_ad("JUMPBACK", 0, -(len(words) + 1)),
+            encode_abc("RETURN", 0, 1, 0),
+        )
+    )
+    return words
 
 
 class RegionTests(unittest.TestCase):
@@ -327,6 +349,68 @@ class RegionTests(unittest.TestCase):
         )
 
         self.assertEqual(result.branches, {})
+
+    def test_loop_local_post_dominators_are_computed_once_per_loop(self):
+        count = 200
+        graph = build_cfg(decode_words(loop_with_interior_diamonds(count)))
+        facts = analyze_cfg(graph)
+
+        with patch.object(
+            regions_module,
+            "_loop_post_dominators",
+            wraps=regions_module._loop_post_dominators,
+        ) as local_post_dominators:
+            result = recover_regions(graph, facts)
+
+        self.assertEqual(local_post_dominators.call_count, 1)
+        self.assertEqual(len(result.branches), count)
+        self.assertEqual(result.branch_at(1).join, 5)
+
+    def test_direct_jump_to_loop_latch_is_continue(self):
+        _, result = regions(
+            [
+                encode_ad("JUMPIFNOT", 0, 3),
+                encode_ad("JUMP", 0, 1),
+                encode_abc("NOP", 0, 0, 0),
+                encode_ad("JUMPBACK", 0, -4),
+                encode_abc("RETURN", 0, 1, 0),
+            ]
+        )
+
+        self.assertEqual(result.edge_role(1, 3), EdgeRole.CONTINUE)
+
+    def test_bare_direct_jump_to_branch_join_latch_is_continue(self):
+        _, result = regions(
+            [
+                encode_ad("JUMPIFNOT", 0, 6),
+                encode_ad("JUMPIFNOT", 1, 1),
+                encode_ad("JUMP", 0, 3),
+                encode_abc("NOP", 0, 0, 0),
+                encode_ad("JUMP", 0, 1),
+                encode_abc("NOP", 0, 0, 0),
+                encode_ad("JUMPBACK", 0, -7),
+                encode_abc("RETURN", 0, 1, 0),
+            ]
+        )
+
+        self.assertEqual(result.edge_role(2, 6), EdgeRole.CONTINUE)
+        self.assertEqual(result.edge_role(3, 6), EdgeRole.NORMAL)
+
+    def test_branch_join_jump_to_loop_latch_stays_normal(self):
+        _, result = regions(
+            [
+                encode_ad("JUMPIFNOT", 0, 5),
+                encode_ad("JUMPIF", 1, 3),
+                encode_abc("NOP", 0, 0, 0),
+                encode_ad("JUMP", 0, 1),
+                encode_abc("NOP", 0, 0, 0),
+                encode_ad("JUMPBACK", 0, -6),
+                encode_abc("RETURN", 0, 1, 0),
+            ]
+        )
+
+        self.assertEqual(result.edge_role(1, 5), EdgeRole.CONTINUE)
+        self.assertEqual(result.edge_role(2, 5), EdgeRole.NORMAL)
 
     def test_while_region_and_structural_edge_roles(self):
         _, result = regions(

@@ -139,7 +139,7 @@ def recover_regions(graph: ControlFlowGraph, facts: ControlFlowFacts) -> RegionM
         block_loops,
     )
     join_owners = _join_owners(branches)
-    edge_roles = _edge_roles(blocks, successors, loops, block_loops)
+    edge_roles = _edge_roles(blocks, successors, loops, block_loops, branches)
 
     return RegionMap(
         branches=_frozen_mapping(branches),
@@ -161,7 +161,7 @@ def _recover_branches(
     block_loops: Mapping[int, tuple[int, ...]],
 ) -> dict[int, BranchRegion]:
     branches: dict[int, BranchRegion] = {}
-    loop_post_dominators: dict[int, Mapping[int, frozenset[int]]] = {}
+    loop_post_dominators: dict[int, Mapping[int, int | None]] = {}
     for header in sorted(blocks):
         if header not in facts.reachable or header in irreducible_nodes:
             continue
@@ -182,10 +182,10 @@ def _recover_branches(
         owner_headers = block_loops.get(header, ())
         if owner_headers:
             loop = loops[owner_headers[0]]
-            local_facts = loop_post_dominators.setdefault(
-                loop.header,
-                _loop_post_dominators(loop, successors),
-            )
+            local_facts = loop_post_dominators.get(loop.header)
+            if local_facts is None:
+                local_facts = _loop_post_dominators(loop, successors)
+                loop_post_dominators[loop.header] = local_facts
             join = _nearest_common_post_dominator(entries, header, local_facts)
             if join is not None:
                 branches[header] = BranchRegion(
@@ -500,7 +500,7 @@ def _block_loops(
 def _loop_post_dominators(
     loop: LoopRegion,
     successors: Mapping[int, tuple[int, ...]],
-) -> Mapping[int, frozenset[int]]:
+) -> Mapping[int, int | None]:
     sink = object()
     local_successors: dict[object, tuple[object, ...]] = {sink: ()}
     for node in loop.nodes:
@@ -514,46 +514,20 @@ def _loop_post_dominators(
                 targets.append(target)
         local_successors[node] = tuple(dict.fromkeys(targets)) or (sink,)
 
-    reverse = {node: [] for node in local_successors}
+    reverse_successors = {node: [] for node in local_successors}
     for node, targets in local_successors.items():
         for target in targets:
-            reverse[target].append(node)
-    can_finish = {sink}
-    pending: list[object] = [sink]
-    while pending:
-        node = pending.pop()
-        for predecessor in reverse[node]:
-            if predecessor not in can_finish:
-                can_finish.add(predecessor)
-                pending.append(predecessor)
-
-    universe = set(can_finish)
-    post_dominators: dict[object, set[object]] = {
-        node: ({sink} if node is sink else set(universe))
-        for node in can_finish
-    }
-    changed = True
-    while changed:
-        changed = False
-        for node in sorted(loop.nodes):
-            if node not in can_finish:
-                continue
-            targets = [
-                target
-                for target in local_successors[node]
-                if target in can_finish
-            ]
-            common = set(post_dominators[targets[0]])
-            for target in targets[1:]:
-                common.intersection_update(post_dominators[target])
-            updated = {node} | common
-            if updated != post_dominators[node]:
-                post_dominators[node] = updated
-                changed = True
-
+            reverse_successors[target].append(node)
+    immediate, _ = _immediate_dominators(
+        sink,
+        {
+            node: tuple(sorted(targets))
+            for node, targets in reverse_successors.items()
+        },
+    )
     return {
-        node: frozenset(value for value in values if value is not sink)
-        for node, values in post_dominators.items()
+        node: parent if parent is not sink else None
+        for node, parent in immediate.items()
         if node is not sink
     }
 
@@ -561,16 +535,95 @@ def _loop_post_dominators(
 def _nearest_common_post_dominator(
     entries: tuple[int, int],
     header: int,
-    post_dominators: Mapping[int, frozenset[int]],
+    immediate_post_dominators: Mapping[int, int | None],
 ) -> int | None:
-    if any(entry not in post_dominators for entry in entries):
-        return None
-    candidates = (
-        post_dominators[entries[0]] & post_dominators[entries[1]]
-    ) - {header}
-    if not candidates:
-        return None
-    return max(candidates, key=lambda node: (len(post_dominators[node]), -node))
+    ancestors: set[int] = set()
+    node: int | None = entries[0]
+    while node is not None:
+        if node != header:
+            ancestors.add(node)
+        node = immediate_post_dominators.get(node)
+
+    node = entries[1]
+    while node is not None:
+        if node in ancestors:
+            return node
+        node = immediate_post_dominators.get(node)
+    return None
+
+
+def _immediate_dominators(
+    entry: object,
+    successors: Mapping[object, tuple[object, ...]],
+) -> tuple[dict[object, object], tuple[object, ...]]:
+    reverse_postorder = _reverse_postorder(entry, successors)
+    order = {node: index for index, node in enumerate(reverse_postorder)}
+    predecessors = {node: [] for node in reverse_postorder}
+    for node in reverse_postorder:
+        for successor in successors[node]:
+            if successor in predecessors:
+                predecessors[successor].append(node)
+
+    immediate = {entry: entry}
+    changed = True
+    while changed:
+        changed = False
+        for node in reverse_postorder[1:]:
+            incoming = [
+                predecessor
+                for predecessor in predecessors[node]
+                if predecessor in immediate
+            ]
+            if not incoming:
+                continue
+            candidate = incoming[0]
+            for predecessor in incoming[1:]:
+                candidate = _intersect_immediate_dominators(
+                    candidate,
+                    predecessor,
+                    immediate,
+                    order,
+                )
+            if immediate.get(node) != candidate:
+                immediate[node] = candidate
+                changed = True
+    return immediate, reverse_postorder
+
+
+def _reverse_postorder(
+    entry: object,
+    successors: Mapping[object, tuple[object, ...]],
+) -> tuple[object, ...]:
+    seen = {entry}
+    postorder: list[object] = []
+    frames: list[tuple[object, int]] = [(entry, 0)]
+    while frames:
+        node, successor_index = frames[-1]
+        targets = successors[node]
+        if successor_index == len(targets):
+            postorder.append(node)
+            frames.pop()
+            continue
+        successor = targets[successor_index]
+        frames[-1] = (node, successor_index + 1)
+        if successor not in seen:
+            seen.add(successor)
+            frames.append((successor, 0))
+    return tuple(reversed(postorder))
+
+
+def _intersect_immediate_dominators(
+    left: object,
+    right: object,
+    immediate: Mapping[object, object],
+    order: Mapping[object, int],
+) -> object:
+    while left != right:
+        if order[left] > order[right]:
+            left = immediate[left]
+        else:
+            right = immediate[right]
+    return left
 
 
 def _edge_roles(
@@ -578,6 +631,7 @@ def _edge_roles(
     successors: Mapping[int, tuple[int, ...]],
     loops: Mapping[int, LoopRegion],
     block_loops: Mapping[int, tuple[int, ...]],
+    branches: Mapping[int, BranchRegion],
 ) -> dict[tuple[int, int], EdgeRole]:
     roles = {
         (source, target): EdgeRole.NORMAL
@@ -591,6 +645,10 @@ def _edge_roles(
                     roles[(loop.prep, target)] = EdgeRole.BODY
                 elif target in loop.exits:
                     roles[(loop.prep, target)] = EdgeRole.EXIT
+
+    branch_joins = frozenset(
+        branch.join for branch in branches.values() if branch.join is not None
+    )
 
     for source, targets in successors.items():
         owner_headers = block_loops.get(source)
@@ -613,6 +671,7 @@ def _edge_roles(
                 loop,
                 blocks,
                 successors,
+                branch_joins,
             ):
                 roles[edge] = EdgeRole.CONTINUE
             elif (
@@ -640,15 +699,16 @@ def _is_continue_edge(
     loop: LoopRegion,
     blocks: Mapping[int, object],
     successors: Mapping[int, tuple[int, ...]],
+    branch_joins: frozenset[int],
 ) -> bool:
     if source == loop.latch_block or target != _continue_block(loop):
         return False
     terminal = _terminal(blocks.get(source))
-    if (
-        terminal is None
-        or terminal.op.name not in _CONDITIONAL_OPS
-        or terminal.jump_target != target
-    ):
+    if terminal is None or terminal.jump_target != target:
+        return False
+    if terminal.op.name == "JUMP":
+        return target not in branch_joins or len(blocks[source].instructions) == 1
+    if terminal.op.name not in _CONDITIONAL_OPS:
         return False
     alternatives = [candidate for candidate in successors[source] if candidate != target]
     return len(alternatives) == 1 and alternatives[0] in loop.nodes

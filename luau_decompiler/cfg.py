@@ -562,18 +562,23 @@ def build_cfg(instructions: list[Instruction]) -> ControlFlowGraph:
         if not insn.is_fallthrough and insn.next_pc in by_pc:
             leaders.add(insn.next_pc)
 
-    sorted_leaders = sorted(leaders)
+    leader_positions: list[tuple[int, int]] = []
+    seen_leaders: set[int] = set()
+    for index, insn in enumerate(sorted_instructions):
+        pc = insn.pc
+        if pc in leaders and pc not in seen_leaders:
+            leader_positions.append((pc, index))
+            seen_leaders.add(pc)
+
     blocks: list[BasicBlock] = []
 
-    for i, leader in enumerate(sorted_leaders):
-        next_leader = sorted_leaders[i + 1] if i + 1 < len(sorted_leaders) else None
-        block_insns = [
-            insn
-            for insn in sorted_instructions
-            if insn.pc >= leader and (next_leader is None or insn.pc < next_leader)
-        ]
-        if not block_insns:
-            continue
+    for i, (leader, start_index) in enumerate(leader_positions):
+        end_index = (
+            leader_positions[i + 1][1]
+            if i + 1 < len(leader_positions)
+            else len(sorted_instructions)
+        )
+        block_insns = sorted_instructions[start_index:end_index]
 
         last = block_insns[-1]
         successors = []

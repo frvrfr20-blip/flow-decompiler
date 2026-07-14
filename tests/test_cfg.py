@@ -482,6 +482,35 @@ class CfgTests(unittest.TestCase):
         self.assertEqual(cfg.block_at(0).successors, [3])
         self.assertEqual([instruction.pc for instruction in cfg.block_at(1).instructions], [1, 2])
 
+    def test_cfg_partitioning_scales_linearly_with_leader_count(self):
+        def build_branch_chain(size: int) -> tuple[ControlFlowGraph, int]:
+            pc_reads = 0
+
+            class CountingInstruction:
+                def __init__(self, pc: int) -> None:
+                    self._pc = pc
+                    self.jump_target = pc + 1 if pc + 1 < size else None
+                    self.next_pc = pc + 1
+                    self.is_fallthrough = False
+
+                @property
+                def pc(self) -> int:
+                    nonlocal pc_reads
+                    pc_reads += 1
+                    return self._pc
+
+            graph = build_cfg([CountingInstruction(pc) for pc in range(size)])
+            return graph, pc_reads
+
+        small_graph, small_reads = build_branch_chain(64)
+        large_graph, large_reads = build_branch_chain(128)
+
+        self.assertEqual(len(small_graph.blocks), 64)
+        self.assertEqual(len(large_graph.blocks), 128)
+        self.assertEqual(large_graph.block_at(63).successors, [64])
+        self.assertEqual(large_graph.block_at(127).successors, [])
+        self.assertLess(large_reads, small_reads * 3)
+
     def test_cfg_does_not_fabricate_out_of_range_jump_target(self):
         cfg = build_cfg(
             decode_words(

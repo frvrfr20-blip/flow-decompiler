@@ -7,7 +7,9 @@ from functools import cache
 import json
 
 from .chunk import BytecodeChunk, Proto, decompose_import_id
+from .cfg import analyze_cfg, build_cfg
 from .opcodes import FASTCALL_OPS
+from .regions import EdgeRole, LoopKind, recover_regions
 from .value_ir import (
     BlockState,
     CallResultGroup,
@@ -662,6 +664,7 @@ def decompile_proto(
     pending_namecalls: dict[int, tuple[str, str]] = {}
     pending_iterator_calls: dict[int, str] = {}
     mutable_capture_locals: dict[int, str] = {}
+    loop_carried_locals: dict[int, str] = {}
     value_capture_locals: dict[int, tuple[str, str]] = {}
     next_capture_local = 0
     open_results: tuple[int, list[str]] | None = None
@@ -905,6 +908,13 @@ def decompile_proto(
             if value != mutable_name:
                 emit_line(indent, f"{mutable_name} = {value}")
             set_reg(reg_id, mutable_name)
+            return
+
+        loop_storage = loop_carried_locals.get(reg_id)
+        if loop_storage is not None:
+            if value != loop_storage:
+                emit_line(indent, f"{loop_storage} = {value}")
+            set_reg(reg_id, loop_storage)
             return
 
         local_name = _debug_local_name(proto, reg_id, pc)
@@ -1432,6 +1442,47 @@ def decompile_proto(
 
     instructions = proto.instructions
     pc_to_index = {insn.pc: index for index, insn in enumerate(instructions)}
+    # Region recovery is deliberately per-prototype: render decisions below only
+    # consult these immutable facts and retain the legacy recognizers as fallback.
+    graph = build_cfg(instructions)
+    region_map = recover_regions(graph, analyze_cfg(graph))
+    pc_to_block_start = {
+        insn.pc: block.start_pc
+        for block in graph.blocks
+        for insn in block.instructions
+    }
+    loops_by_prep = {
+        loop.prep: loop
+        for loop in region_map.loops.values()
+        if loop.prep is not None
+    }
+
+    def block_start_for_pc(pc: int | None) -> int | None:
+        return pc_to_block_start.get(pc) if pc is not None else None
+
+    def graph_branch_for(insn) -> object | None:
+        start = block_start_for_pc(insn.pc)
+        return region_map.branches.get(start) if start is not None else None
+
+    def graph_loop_for(insn) -> object | None:
+        start = block_start_for_pc(insn.pc)
+        if start is not None:
+            if insn.op.name in {"FORNPREP", "FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT"}:
+                prep_loop = loops_by_prep.get(start)
+                if prep_loop is not None:
+                    return prep_loop
+            loop = region_map.loops.get(start)
+            if loop is not None:
+                return loop
+        return None
+
+    def graph_edge_role(insn, target: int | None) -> EdgeRole | None:
+        source = block_start_for_pc(insn.pc)
+        destination = block_start_for_pc(target)
+        if source is None or destination is None:
+            return None
+        return region_map.edge_roles.get((source, destination), EdgeRole.NORMAL)
+
     last_instruction = instructions[-1] if instructions else None
     conditional_jumps_by_target: dict[int, list[int]] = {}
     jumpbacks_by_target: dict[int, list[int]] = {}
@@ -2311,6 +2362,13 @@ def decompile_proto(
             value_ir: Value | None = None,
         ) -> None:
             ir_value = value_ir or UnknownValue(pc, "source expression has no value IR", proto.id)
+            loop_storage = loop_carried_locals.get(reg_id)
+            if loop_storage is not None:
+                if value != loop_storage:
+                    emit_line(indent, f"{loop_storage} = {value}")
+                set_reg(reg_id, loop_storage)
+                set_value_version(reg_id, ir_value.source_pc, ir_value)
+                return
             use_count = future_register_read_count(instruction_index + 1, reg_id)
             if (
                 reg_id >= proto.numparams
@@ -2325,6 +2383,40 @@ def decompile_proto(
                 return
             set_reg_or_declare_local(reg_id, value, pc, indent)
             set_value_version(reg_id, ir_value.source_pc, ir_value)
+
+        def materialize_loop_carried_scalars(
+            body_index: int,
+            latch_pc: int,
+            indent: int,
+        ) -> None:
+            """Give loop-carried expression registers stable source storage."""
+            for reg_id, source in tuple(regs.items()):
+                known_storage = (
+                    source in inferred_local_storage.values()
+                    or source in debug_local_storage.values()
+                )
+                if reg_id in table_literals or (_is_identifier(source) and not known_storage):
+                    continue
+                reads_and_writes = False
+                for candidate in instructions[body_index:]:
+                    if candidate.pc >= latch_pc:
+                        break
+                    if (
+                        instruction_reads_register(candidate, reg_id)
+                        and instruction_writes_register(candidate, reg_id)
+                    ):
+                        reads_and_writes = True
+                        break
+                if not reads_and_writes:
+                    continue
+                storage = source if known_storage else declare_inferred_value(f"r{reg_id}", source, indent)
+                loop_carried_locals[reg_id] = storage
+                set_reg(reg_id, storage)
+                set_value_version(
+                    reg_id,
+                    current_definition_pc,
+                    UnknownValue(current_definition_pc, "loop-carried scalar", proto.id),
+                )
 
         def materialize_upvalue_snapshots(
             instruction_index: int,
@@ -3033,7 +3125,13 @@ def decompile_proto(
             saved = snapshot_state()
             open_results = None
             emit_line(indent, f"while {condition_chain_source(conditions, 'and')} do")
-            emit_range(body_index, maybe_backedge.pc, indent + 1, backedge_target, end_pc)
+            loop_fact = graph_loop_for(insn)
+            continue_pc = (
+                loop_fact.continue_target
+                if loop_fact is not None and loop_fact.kind is LoopKind.WHILE
+                else backedge_target
+            )
+            emit_range(body_index, maybe_backedge.pc, indent + 1, continue_pc, end_pc)
             emit_line(indent, "end")
             restore_state(saved)
             return end_index
@@ -3093,7 +3191,13 @@ def decompile_proto(
             saved_tables = clone_tables()
             open_results = None
             emit_line(indent, f"while {condition_chain_source([*conditions, final_condition], 'or')} do")
-            emit_range(body_index, maybe_backedge.pc, indent + 1, backedge_target, exit_pc)
+            loop_fact = graph_loop_for(insn)
+            continue_pc = (
+                loop_fact.continue_target
+                if loop_fact is not None and loop_fact.kind is LoopKind.WHILE
+                else backedge_target
+            )
+            emit_range(body_index, maybe_backedge.pc, indent + 1, continue_pc, exit_pc)
             emit_line(indent, "end")
             regs = saved_regs
             table_literals = saved_tables
@@ -3776,6 +3880,7 @@ def decompile_proto(
             name = insn.op.name
             finalize_pending_table_reads(insn, indent)
             if name in {"FORGPREP", "FORGPREP_INEXT", "FORGPREP_NEXT"}:
+                region_loop = graph_loop_for(insn)
                 target = insn.jump_target
                 body_index = pc_to_index.get(insn.next_pc)
                 loop_index = pc_to_index.get(target) if target is not None else None
@@ -3797,8 +3902,13 @@ def decompile_proto(
                         var_count = (maybe_loop.aux or 1) & 0xFF
                         if var_count <= 0:
                             var_count = 1
+                        result_base = (
+                            region_loop.result_base
+                            if region_loop is not None and region_loop.result_base is not None
+                            else insn.a + 3
+                        )
                         loop_vars = [
-                            _debug_local_name(proto, insn.a + 3 + offset, insn.next_pc) or f"r{insn.a + 3 + offset}"
+                            _debug_local_name(proto, result_base + offset, insn.next_pc) or f"r{result_base + offset}"
                             for offset in range(var_count)
                         ]
                         iterator_call = pending_iterator_calls.pop(insn.a, None)
@@ -3821,8 +3931,8 @@ def decompile_proto(
                         open_results = None
                         note_direct_locals(var_count)
                         for offset, loop_var in enumerate(loop_vars):
-                            regs[insn.a + 3 + offset] = loop_var
-                            table_literals.pop(insn.a + 3 + offset, None)
+                            regs[result_base + offset] = loop_var
+                            table_literals.pop(result_base + offset, None)
                             if _is_identifier(loop_var):
                                 reserved_local_names.add(loop_var)
                         emit_line(indent, f"for {', '.join(loop_vars)} in {', '.join(iterator_values)} do")
@@ -3838,6 +3948,7 @@ def decompile_proto(
                         continue
 
             if name == "FORNPREP":
+                region_loop = graph_loop_for(insn)
                 target = insn.jump_target
                 body_index = pc_to_index.get(insn.next_pc)
                 target_index = pc_to_index.get(target) if target is not None else None
@@ -3849,13 +3960,30 @@ def decompile_proto(
                     and target_index > body_index
                     and (stop_pc is None or target <= stop_pc)
                 ):
-                    maybe_loop = instructions[target_index - 1]
+                    latch_index = target_index - 1
+                    maybe_loop = instructions[latch_index] if latch_index is not None else None
                     if (
-                        maybe_loop.op.name == "FORNLOOP"
+                        maybe_loop is not None
+                        and maybe_loop.op.name == "FORNLOOP"
                         and maybe_loop.a == insn.a
                         and maybe_loop.jump_target == insn.next_pc
                     ):
-                        loop_var = _debug_local_name(proto, insn.a + 3, insn.next_pc) or f"r{insn.a + 3}"
+                        visible_register = (
+                            region_loop.visible_register
+                            if region_loop is not None and region_loop.visible_register is not None
+                            else insn.a + 3
+                        )
+                        if (
+                            visible_register != insn.a + 3
+                            and not any(
+                                instruction_reads_register(candidate, visible_register)
+                                for candidate in instructions[body_index:latch_index]
+                            )
+                        ):
+                            # Some handcrafted legacy chunks use the historical
+                            # slot even though their FORN shape is reducible.
+                            visible_register = insn.a + 3
+                        loop_var = _debug_local_name(proto, visible_register, insn.next_pc) or f"r{visible_register}"
                         start_value = reg(insn.a + 2)
                         limit_value = reg(insn.a)
                         step_value = reg(insn.a + 1)
@@ -3868,8 +3996,8 @@ def decompile_proto(
                         saved_tables = clone_tables()
                         saved_reserved_names = set(reserved_local_names)
                         open_results = None
-                        regs[insn.a + 3] = loop_var
-                        table_literals.pop(insn.a + 3, None)
+                        regs[visible_register] = loop_var
+                        table_literals.pop(visible_register, None)
                         if _is_identifier(loop_var):
                             reserved_local_names.add(loop_var)
                         emit_line(indent, f"for {loop_var} = {start_value}, {limit_value}, {step_value} do")
@@ -3916,6 +4044,7 @@ def decompile_proto(
             if repeat_exit_guard_index is not None and repeat_backedge_index is not None:
                 repeat_guard = instructions[repeat_exit_guard_index]
                 repeat_backedge = instructions[repeat_backedge_index]
+                materialize_loop_carried_scalars(index, repeat_guard.pc, indent)
                 saved = snapshot_state()
                 open_results = None
                 emit_line(indent, "repeat")
@@ -3969,6 +4098,7 @@ def decompile_proto(
                     expected_next_pc = candidate.pc
                     previous_index -= 1
 
+                materialize_loop_carried_scalars(index, repeat_jump.pc, indent)
                 saved_regs = dict(regs)
                 saved_tables = clone_tables()
                 open_results = None
@@ -4000,6 +4130,145 @@ def decompile_proto(
                 continue
 
             if name in _CONDITIONAL_JUMP_OPS:
+                branch_fact = graph_branch_for(insn)
+                if branch_fact is not None and branch_fact.join is None:
+                    target = insn.jump_target
+                    true_condition = (
+                        jump_taken_condition(insn)
+                        if block_start_for_pc(target) == branch_fact.true_entry
+                        else jump_fallthrough_condition(insn)
+                    )
+
+                    def terminal_arm_end(entry: int) -> int | None:
+                        block = graph.block_at(entry)
+                        if (
+                            block is None
+                            or block.start_pc != entry
+                            or block.successors
+                            or not block.instructions
+                            or block.instructions[-1].op.name != "RETURN"
+                        ):
+                            return None
+                        return block.instructions[-1].next_pc
+
+                    true_end = terminal_arm_end(branch_fact.true_entry)
+                    false_end = terminal_arm_end(branch_fact.false_entry)
+                    true_index = pc_to_index.get(branch_fact.true_entry)
+                    false_index = pc_to_index.get(branch_fact.false_entry)
+                    if (
+                        true_condition is not None
+                        and true_index is not None
+                        and false_index is not None
+                        and true_end is None
+                        and false_end is not None
+                        and branch_fact.true_entry < branch_fact.false_entry
+                        and sum(
+                            candidate.op.name in _CONDITIONAL_JUMP_OPS
+                            for candidate in instructions[true_index:false_index]
+                        ) >= 2
+                        and not any(
+                            candidate.op.name in {"JUMP", "JUMPX"}
+                            and candidate.jump_target is not None
+                            and candidate.jump_target > branch_fact.false_entry
+                            for candidate in instructions[true_index:false_index]
+                        )
+                        and (stop_pc is None or branch_fact.false_entry < stop_pc)
+                    ):
+                            branch_saved = snapshot_state()
+                            open_results = None
+                            emit_line(indent, f"if {true_condition} then")
+                            emit_range(
+                                true_index,
+                                branch_fact.false_entry,
+                                indent + 1,
+                                loop_continue_pc,
+                                loop_exit_pc,
+                            )
+                            emit_line(indent, "end")
+                            restore_state(branch_saved)
+                            index = false_index
+                            continue
+
+                target = insn.jump_target
+                transfer_role = graph_edge_role(insn, target)
+                transfer_condition = jump_taken_condition(insn)
+                fallthrough_role = graph_edge_role(insn, insn.next_pc)
+                fallthrough_condition = jump_fallthrough_condition(insn)
+                body_index = pc_to_index.get(insn.next_pc)
+                if (
+                    (transfer_condition is not None or fallthrough_condition is not None)
+                    and body_index is not None
+                    and loop_exit_pc is not None
+                    and (fallthrough_block_start := block_start_for_pc(insn.next_pc)) is not None
+                    and (fallthrough_block := graph.block_at(fallthrough_block_start)) is not None
+                    and bool(fallthrough_block.instructions)
+                    and len(fallthrough_block.instructions) == 1
+                    and fallthrough_block.instructions[-1].op.name in {"JUMP", "JUMPX"}
+                    and fallthrough_block.instructions[-1].jump_target == loop_exit_pc
+                ):
+                    condition = fallthrough_condition
+                    emit_line(indent, f"if {condition} then")
+                    emit_line(indent + 1, "break")
+                    emit_line(indent, "end")
+                    index = pc_to_index.get(target, index + 1)
+                    continue
+                if (
+                    (transfer_condition is not None or fallthrough_condition is not None)
+                    and body_index is not None
+                    and (transfer_role is EdgeRole.CONTINUE or fallthrough_role is EdgeRole.CONTINUE)
+                    and loop_continue_pc is not None
+                ):
+                    condition = (
+                        transfer_condition
+                        if transfer_role is EdgeRole.CONTINUE
+                        else fallthrough_condition
+                    )
+                    emit_line(indent, f"if {condition} then")
+                    emit_line(indent + 1, "continue")
+                    emit_line(indent, "end")
+                    index = (
+                        body_index
+                        if transfer_role is EdgeRole.CONTINUE
+                        else pc_to_index.get(target, index + 1)
+                    )
+                    continue
+
+                # Region recovery intentionally declines a conditional whose
+                # fallthrough is a one-hop jump to the loop latch. Keep the
+                # long-standing renderer path for that compact compiler shape.
+                fallthrough_block_start = block_start_for_pc(insn.next_pc)
+                fallthrough_block = (
+                    graph.block_at(fallthrough_block_start)
+                    if fallthrough_block_start is not None
+                    else None
+                )
+                fallthrough_terminal = (
+                    fallthrough_block.instructions[-1]
+                    if fallthrough_block is not None and fallthrough_block.instructions
+                    else None
+                )
+                if (
+                    fallthrough_condition is not None
+                    and fallthrough_terminal is not None
+                    and fallthrough_terminal.op.name in {"JUMP", "JUMPX", "JUMPBACK"}
+                    and len(fallthrough_block.instructions) == 1
+                    and (
+                        fallthrough_terminal.jump_target == loop_continue_pc
+                        or any(
+                            loop.continue_target == loop_continue_pc
+                            and fallthrough_terminal.jump_target == loop.header
+                            for loop in region_map.loops.values()
+                        )
+                    )
+                    and target is not None
+                    and target in pc_to_index
+                ):
+                    emit_line(indent, f"if {fallthrough_condition} then")
+                    emit_line(indent + 1, "continue")
+                    emit_line(indent, "end")
+                    index = pc_to_index[target]
+                    continue
+
                 folded_index = folded_boolean_assignment_index(insn, indent)
                 if folded_index is not None:
                     open_results = None
@@ -4237,7 +4506,13 @@ def decompile_proto(
                                 else (jump_fallthrough_condition(insn) or condition)
                             )
                             emit_line(indent, f"while {loop_condition} do")
-                            emit_range(loop_body_index, maybe_backedge.pc, indent + 1, backedge_target, target)
+                            loop_fact = graph_loop_for(insn)
+                            continue_pc = (
+                                loop_fact.continue_target
+                                if loop_fact is not None and loop_fact.kind is LoopKind.WHILE
+                                else backedge_target
+                            )
+                            emit_range(loop_body_index, maybe_backedge.pc, indent + 1, continue_pc, target)
                             emit_line(indent, "end")
                             regs = saved_regs
                             table_literals = saved_tables
